@@ -12,7 +12,6 @@
     "@vercel/analytics": "^1.5.0",
     "autoprefixer": "^10.4.16",
     "axios": "^1.6.2",
-    "crypto-js": "^4.2.0",
     "date-fns": "^3.0.0",
     "framer-motion": "^10.16.16",
     "lucide-react": "^0.294.0",
@@ -27,7 +26,6 @@
     "yahoo-finance2": "^3.10.1"
   },
   "devDependencies": {
-    "@types/crypto-js": "^4.2.2",
     "@types/node": "^20.10.5",
     "@types/pg": "^8.15.6",
     "@types/react": "^18.2.45",

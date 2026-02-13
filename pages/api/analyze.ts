@@ -1,6 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import YahooFinance from 'yahoo-finance2';
-import { Client } from 'pg';
 
 const yahooFinance = new YahooFinance();
 
@@ -19,30 +18,35 @@ export default async function handler(
       return res.status(400).json({ error: 'Ticker is required' });
     }
 
-    // Fetch stock quote data
-    const quote: any = await yahooFinance.quote(ticker);
-    
-    // Fetch historical data (10 years)
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setFullYear(startDate.getFullYear() - 10);
-    
-    const historicalData: any = await yahooFinance.historical(ticker, {
-      period1: startDate,
-      period2: endDate,
-      interval: '1d',
-    });
+    // Fetch quote + summary in parallel
+    const [quote, summary, historicalData] = await Promise.all([
+      yahooFinance.quote(ticker) as Promise<any>,
+      yahooFinance.quoteSummary(ticker, {
+        modules: ['financialData', 'summaryDetail', 'assetProfile', 'defaultKeyStatistics'],
+      }).catch(() => null),
+      // 10 years of history for chart
+      (async () => {
+        const endDate = new Date();
+        const startDate = new Date();
+        startDate.setFullYear(startDate.getFullYear() - 10);
+        return yahooFinance.historical(ticker, {
+          period1: startDate,
+          period2: endDate,
+          interval: '1d',
+        }) as Promise<any>;
+      })(),
+    ]);
 
-    // Format chart data for Plotly
+    // Chart data
     const chartDates = historicalData.map((d: any) => d.date.toISOString().split('T')[0]);
     const chartPrices = historicalData.map((d: any) => d.close);
-    
-    // Calculate SMA 50 and SMA 200
+
+    // SMA calculations
     const calculateSMA = (prices: number[], period: number): number[] => {
       const sma: number[] = [];
       for (let i = 0; i < prices.length; i++) {
         if (i < period - 1) {
-          sma.push(NaN); // Not enough data points
+          sma.push(NaN);
         } else {
           const sum = prices.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
           sma.push(sum / period);
@@ -50,118 +54,18 @@ export default async function handler(
       }
       return sma;
     };
-    
+
     const sma50 = calculateSMA(chartPrices, 50);
     const sma200 = calculateSMA(chartPrices, 200);
-    
-    // Calculate price range for y-axis (with 10% padding)
-    const minPrice = Math.min(...chartPrices);
-    const maxPrice = Math.max(...chartPrices);
-    const priceRange = maxPrice - minPrice;
-    const yAxisMin = Math.max(0, minPrice - priceRange * 0.1); // Don't go below 0
-    const yAxisMax = maxPrice + priceRange * 0.1;
-    
-    // Calculate date constraints (10 years ago to now) - reuse existing dates
-    const minDate = startDate.toISOString().split('T')[0];
-    const maxDate = endDate.toISOString().split('T')[0];
-    
-    // Create a map of dates to prices for signal positioning
-    const dateToPriceMap: { [key: string]: number } = {};
-    historicalData.forEach((d: any, idx: number) => {
-      const dateStr = d.date.toISOString().split('T')[0];
-      dateToPriceMap[dateStr] = d.close;
-    });
 
-    // Fetch signals for this ticker from database
-    const client = new Client({
-      connectionString: process.env.DATABASE_URL,
-    });
+    // Extract fundamentals
+    const fin = summary?.financialData || ({} as any);
+    const det = summary?.summaryDetail || ({} as any);
+    const prof = summary?.assetProfile || ({} as any);
 
-    interface Signal {
-      date: string;
-      type: string;
-      price: string;
-      Date: Date;
-    }
-
-    let signals: Signal[] = [];
-    let forecast: any = null;
-
-    try {
-      await client.connect();
-
-      // Get recent signals for this ticker
-      const signalsResult = await client.query(`
-        SELECT "Date", "Signal", "Price", "Confidence_Pct"
-        FROM all_signals
-        WHERE "Ticker" = $1
-        ORDER BY "Date" DESC
-        LIMIT 10
-      `, [ticker.toUpperCase()]);
-
-      signals = signalsResult.rows.map((row: any) => {
-        const signalDate = new Date(row.Date).toISOString().split('T')[0];
-        // Find the closest price from historical data
-        let signalPrice = dateToPriceMap[signalDate];
-        let chartDate = signalDate;
-        
-        // If exact date not found, find the closest date
-        if (!signalPrice) {
-          const signalDateObj = new Date(signalDate);
-          let closestDate = chartDates[0];
-          let minDiff = Math.abs(new Date(chartDates[0]).getTime() - signalDateObj.getTime());
-          
-          for (const date of chartDates) {
-            const diff = Math.abs(new Date(date).getTime() - signalDateObj.getTime());
-            if (diff < minDiff) {
-              minDiff = diff;
-              closestDate = date;
-            }
-          }
-          chartDate = closestDate;
-          signalPrice = dateToPriceMap[closestDate] || row.Price;
-        }
-        
-        return {
-          date: chartDate,
-          type: row.Signal,
-          price: `${row.Price.toFixed(2)}`,
-          Date: row.Date,
-          chartPrice: signalPrice
-        };
-      });
-
-      // Check for recent forecast (last 30 days)
-      const forecastResult = await client.query(`
-        SELECT 
-          "Forecast_Signal",
-          "Confidence_%",
-          "Days_To_Crossover",
-          "Date"
-        FROM forecast_signals
-        WHERE "Ticker" = $1
-        AND "Date" >= CURRENT_DATE - INTERVAL '30 days'
-        ORDER BY "Date" DESC
-        LIMIT 1
-      `, [ticker.toUpperCase()]);
-
-      if (forecastResult.rows.length > 0) {
-        const f = forecastResult.rows[0];
-        forecast = {
-          signal: f.Forecast_Signal.replace('_FORECAST', '').replace('_', ' '),
-          confidence: f['Confidence_%'],
-          days: f.Days_To_Crossover.toFixed(1),
-          date: new Date(f.Date).toISOString().split('T')[0],
-          isRecent: true
-        };
-      }
-
-      await client.end();
-    } catch (dbError) {
-      console.error('Database error:', dbError);
-      await client.end();
-      // Continue without signals/forecast if DB fails
-    }
+    const safeNum = (v: any) => (v != null && !isNaN(v) ? v : null);
+    const totalRevenue = safeNum(fin.totalRevenue);
+    const employees = safeNum(prof.fullTimeEmployees);
 
     // Format market cap
     const formatMarketCap = (value: number) => {
@@ -171,16 +75,31 @@ export default async function handler(
       return `${value.toLocaleString()}`;
     };
 
-    // Prepare signal markers for chart
-    const buySignals = signals.filter((s: any) => s.type.includes('Buy'));
-    const sellSignals = signals.filter((s: any) => s.type.includes('Sell'));
-    
     const responseData = {
       ticker: ticker.toUpperCase(),
+      companyName: quote.shortName || quote.longName || ticker.toUpperCase(),
       price: `${quote.regularMarketPrice?.toFixed(2) || 'N/A'}`,
       marketCap: quote.marketCap ? formatMarketCap(quote.marketCap) : 'N/A',
       volume: quote.regularMarketVolume ? quote.regularMarketVolume.toLocaleString() : 'N/A',
       peRatio: quote.trailingPE ? quote.trailingPE.toFixed(2) : 'N/A',
+      // Extended fundamentals
+      fundamentals: {
+        roe: fin.returnOnEquity != null ? (fin.returnOnEquity * 100).toFixed(1) + '%' : 'N/A',
+        roa: fin.returnOnAssets != null ? (fin.returnOnAssets * 100).toFixed(1) + '%' : 'N/A',
+        debtToEquity: fin.debtToEquity != null ? fin.debtToEquity.toFixed(1) : 'N/A',
+        grossMargin: fin.grossMargins != null ? (fin.grossMargins * 100).toFixed(1) + '%' : 'N/A',
+        dividendYield: det.dividendYield != null ? (det.dividendYield * 100).toFixed(2) + '%' : 'N/A',
+        beta: det.beta != null ? det.beta.toFixed(2) : 'N/A',
+        totalRevenue: totalRevenue ? formatMarketCap(totalRevenue) : 'N/A',
+        revenuePerEmployee: (totalRevenue && employees && employees > 0)
+          ? `$${Math.round(totalRevenue / employees).toLocaleString()}`
+          : 'N/A',
+        fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh ? `$${quote.fiftyTwoWeekHigh.toFixed(2)}` : 'N/A',
+        fiftyTwoWeekLow: quote.fiftyTwoWeekLow ? `$${quote.fiftyTwoWeekLow.toFixed(2)}` : 'N/A',
+        sector: prof.sector || 'N/A',
+        industry: prof.industry || 'N/A',
+        employees: employees ? employees.toLocaleString() : 'N/A',
+      },
       chart: {
         data: [
           {
@@ -192,7 +111,6 @@ export default async function handler(
             line: { color: '#14b8a6', width: 2 },
             hovertemplate: '<b>%{fullData.name}</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
           },
-          // SMA 50 (Blue)
           {
             x: chartDates,
             y: sma50,
@@ -202,7 +120,6 @@ export default async function handler(
             line: { color: '#3b82f6', width: 1.5 },
             hovertemplate: '<b>SMA 50</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
           },
-          // SMA 200 (Yellow)
           {
             x: chartDates,
             y: sma200,
@@ -212,82 +129,34 @@ export default async function handler(
             line: { color: '#eab308', width: 1.5 },
             hovertemplate: '<b>SMA 200</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
           },
-          // Buy signals (green up arrows)
-          ...(buySignals.length > 0 ? [{
-            x: buySignals.map((s: any) => s.date),
-            y: buySignals.map((s: any) => s.chartPrice),
-            type: 'scatter',
-            mode: 'markers+text',
-            name: 'Buy Signals',
-            marker: {
-              symbol: 'triangle-up',
-              size: 12,
-              color: '#10b981',
-              line: { color: '#10b981', width: 1 }
-            },
-            text: '',
-            textposition: 'top center',
-            hovertemplate: '<b>Buy Signal</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
-            showlegend: false,
-          }] : []),
-          // Sell signals (red down arrows)
-          ...(sellSignals.length > 0 ? [{
-            x: sellSignals.map((s: any) => s.date),
-            y: sellSignals.map((s: any) => s.chartPrice),
-            type: 'scatter',
-            mode: 'markers+text',
-            name: 'Sell Signals',
-            marker: {
-              symbol: 'triangle-down',
-              size: 12,
-              color: '#ef4444',
-              line: { color: '#ef4444', width: 1 }
-            },
-            text: '',
-            textposition: 'bottom center',
-            hovertemplate: '<b>Sell Signal</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
-            showlegend: false,
-          }] : []),
         ],
         layout: {
           title: `${quote.shortName || ticker.toUpperCase()} - 10 Year Chart`,
-          xaxis: { 
+          xaxis: {
             title: 'Date',
             type: 'date',
-            // Default to showing last ~8 months to shift right and show current date better
             range: chartDates.length > 0 ? [
-              chartDates[Math.max(0, chartDates.length - 180)], // ~8 months ago (180 trading days)
-              chartDates[chartDates.length - 1] // Today
+              chartDates[Math.max(0, chartDates.length - 180)],
+              chartDates[chartDates.length - 1],
             ] : undefined,
-            // Constrain to 10 years max
-            rangebreaks: [],
             autorange: false,
           },
-          yaxis: { 
+          yaxis: {
             title: 'Price (USD)',
-            autorange: true, // Auto-scale based on visible data
-            fixedrange: false, // Allow zooming
+            autorange: true,
+            fixedrange: false,
           },
           autosize: true,
-          // Store constraints for client-side enforcement
-          _constraints: {
-            xMin: minDate,
-            xMax: maxDate,
-            yMin: yAxisMin,
-            yMax: yAxisMax,
-          },
         },
       },
-      forecast: forecast,
-      signals: signals,
     };
 
     res.status(200).json(responseData);
   } catch (error: any) {
     console.error('Analysis error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Failed to analyze stock',
-      details: error.message 
+      details: error.message,
     });
   }
 }
