@@ -43,8 +43,9 @@ export default async function handler(
 
             try {
                 // Run the scan script as a child process (outside Next.js context)
-                const scriptPath = join(process.cwd(), 'scripts', 'scan.js');
-                const output = execSync(`node ${scriptPath}${subsetArg}`, {
+                // Using Python script for better Yahoo Finance handling (yfinance)
+                const scriptPath = join(process.cwd(), 'scripts', 'scan.py');
+                const output = execSync(`python3 ${scriptPath}${subsetArg}`, {
                     timeout: 300000, // 5 min timeout
                     encoding: 'utf-8',
                     cwd: process.cwd(),
