@@ -3,6 +3,10 @@ import { Pool } from 'pg';
 // Shared Neon PostgreSQL pool
 let pool: Pool | null = null;
 
+// In-memory fallback for local development when Neon is unreachable
+let inMemoryCache: any[] = [];
+let useInMemory = false;
+
 export function getPool(): Pool {
     if (!pool) {
         pool = new Pool({
@@ -10,7 +14,6 @@ export function getPool(): Pool {
             max: 5,
             idleTimeoutMillis: 30000,
             connectionTimeoutMillis: 10000,
-            ssl: { rejectUnauthorized: false },
         });
     }
     return pool;
@@ -18,8 +21,9 @@ export function getPool(): Pool {
 
 // Initialize screener_cache table if it doesn't exist
 export async function initScreenerTable(): Promise<void> {
-    const db = getPool();
-    await db.query(`
+    try {
+        const db = getPool();
+        await db.query(`
     CREATE TABLE IF NOT EXISTS screener_cache (
       ticker VARCHAR(10) PRIMARY KEY,
       price REAL,
@@ -41,6 +45,11 @@ export async function initScreenerTable(): Promise<void> {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+        useInMemory = false;
+    } catch (error: any) {
+        console.warn('[DB] Neon connection failed, using in-memory storage for local dev:', error.message);
+        useInMemory = true;
+    }
 }
 
 // Upsert a screener row
@@ -63,6 +72,17 @@ export async function upsertScreenerRow(data: {
     fifty_two_week_low: number | null;
     beta: number | null;
 }): Promise<void> {
+    if (useInMemory) {
+        // In-memory: upsert
+        const existingIndex = inMemoryCache.findIndex(row => row.ticker === data.ticker);
+        if (existingIndex >= 0) {
+            inMemoryCache[existingIndex] = { ...data, updated_at: new Date().toISOString() };
+        } else {
+            inMemoryCache.push({ ...data, updated_at: new Date().toISOString() });
+        }
+        return;
+    }
+
     const db = getPool();
     await db.query(
         `INSERT INTO screener_cache (
@@ -102,6 +122,10 @@ export async function upsertScreenerRow(data: {
 
 // Fetch all cached screener data
 export async function getScreenerData(): Promise<any[]> {
+    if (useInMemory) {
+        return inMemoryCache.sort((a, b) => (b.market_cap || 0) - (a.market_cap || 0));
+    }
+
     const db = getPool();
     const result = await db.query(
         `SELECT * FROM screener_cache ORDER BY market_cap DESC NULLS LAST`
@@ -111,6 +135,19 @@ export async function getScreenerData(): Promise<any[]> {
 
 // Get scan metadata
 export async function getScanMetadata(): Promise<{ count: number; lastUpdated: string | null }> {
+    if (useInMemory) {
+        const lastUpdated = inMemoryCache.length > 0
+            ? inMemoryCache.reduce((latest, row) =>
+                new Date(row.updated_at) > new Date(latest) ? row.updated_at : latest,
+                inMemoryCache[0].updated_at)
+            : null;
+
+        return {
+            count: inMemoryCache.length,
+            lastUpdated,
+        };
+    }
+
     const db = getPool();
     const result = await db.query(
         `SELECT COUNT(*) as count, MAX(updated_at) as last_updated FROM screener_cache`

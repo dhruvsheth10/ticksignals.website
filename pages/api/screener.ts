@@ -61,21 +61,32 @@ async function fetchTickerData(ticker: string): Promise<any> {
 // Process tickers in batches
 async function processBatch(tickers: string[], batchSize: number = 5): Promise<number> {
     let processed = 0;
+    console.log(`[Screener] Starting batch processing of ${tickers.length} tickers...`);
 
     for (let i = 0; i < tickers.length; i += batchSize) {
         const batch = tickers.slice(i, i + batchSize);
+        console.log(`[Screener] Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(tickers.length / batchSize)}: ${batch.join(', ')}`);
+
         const results = await Promise.allSettled(
             batch.map(ticker => fetchTickerData(ticker))
         );
 
-        for (const result of results) {
+        for (let j = 0; j < results.length; j++) {
+            const result = results[j];
+            const ticker = batch[j];
+
             if (result.status === 'fulfilled' && result.value) {
                 try {
                     await upsertScreenerRow(result.value);
                     processed++;
-                } catch (dbErr) {
-                    console.error('DB upsert error:', dbErr);
+                    console.log(`[Screener] ✓ ${ticker} saved (${processed}/${tickers.length})`);
+                } catch (dbErr: any) {
+                    console.error(`[Screener] ✗ DB error for ${ticker}:`, dbErr.message);
                 }
+            } else if (result.status === 'rejected') {
+                console.error(`[Screener] ✗ Fetch failed for ${ticker}:`, result.reason);
+            } else {
+                console.warn(`[Screener] ⊘ ${ticker} returned null (likely delisted or invalid)`);
             }
         }
 
@@ -85,6 +96,7 @@ async function processBatch(tickers: string[], batchSize: number = 5): Promise<n
         }
     }
 
+    console.log(`[Screener] Batch processing complete: ${processed}/${tickers.length} stocks saved`);
     return processed;
 }
 
@@ -131,6 +143,8 @@ export default async function handler(
             const tickersToProcess = subset
                 ? TICKER_LIST.slice(0, parseInt(subset))
                 : TICKER_LIST;
+
+            console.log(`[Screener] Loaded ${TICKER_LIST.length} tickers from CSV, processing ${tickersToProcess.length} tickers`);
 
             const startTime = Date.now();
             const processed = await processBatch(tickersToProcess, 5);
