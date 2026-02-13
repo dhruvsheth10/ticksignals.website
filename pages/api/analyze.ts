@@ -1,7 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import YahooFinance from 'yahoo-finance2';
-
-const yahooFinance = new YahooFinance();
+import { batchQuote, getQuoteSummary } from '../../lib/yahoo';
 
 export default async function handler(
   req: NextApiRequest,
@@ -18,28 +16,39 @@ export default async function handler(
       return res.status(400).json({ error: 'Ticker is required' });
     }
 
-    // Fetch quote + summary in parallel
-    const [quote, summary, historicalData] = await Promise.all([
-      yahooFinance.quote(ticker) as Promise<any>,
-      yahooFinance.quoteSummary(ticker, {
-        modules: ['financialData', 'summaryDetail', 'assetProfile', 'defaultKeyStatistics'],
-      }).catch(() => null),
-      // 10 years of history for chart
-      (async () => {
-        const endDate = new Date();
-        const startDate = new Date();
-        startDate.setFullYear(startDate.getFullYear() - 10);
-        return yahooFinance.historical(ticker, {
-          period1: startDate,
-          period2: endDate,
-          interval: '1d',
-        }) as Promise<any>;
-      })(),
+    const upperTicker = ticker.toUpperCase();
+
+    // Fetch quote + fundamentals in parallel using our raw Yahoo client
+    const [quotes, fundamentals] = await Promise.all([
+      batchQuote([upperTicker]),
+      getQuoteSummary(upperTicker),
     ]);
 
-    // Chart data
-    const chartDates = historicalData.map((d: any) => d.date.toISOString().split('T')[0]);
-    const chartPrices = historicalData.map((d: any) => d.close);
+    const quote = quotes[0];
+    if (!quote) {
+      return res.status(404).json({ error: `Ticker ${upperTicker} not found` });
+    }
+
+    // Fetch historical data for chart using yahoo-finance2 (chart endpoint works)
+    // We'll use raw fetch for this too
+    const endDate = Math.floor(Date.now() / 1000);
+    const startDate = endDate - (10 * 365.25 * 24 * 60 * 60); // 10 years
+    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${upperTicker}?period1=${Math.floor(startDate)}&period2=${endDate}&interval=1d`;
+
+    const chartRes = await fetch(chartUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
+    });
+    const chartData = await chartRes.json();
+
+    const chartResult = chartData.chart?.result?.[0];
+    const timestamps = chartResult?.timestamp || [];
+    const closes = chartResult?.indicators?.quote?.[0]?.close || [];
+
+    // Convert timestamps to dates
+    const chartDates = timestamps.map((ts: number) => {
+      const d = new Date(ts * 1000);
+      return d.toISOString().split('T')[0];
+    });
 
     // SMA calculations
     const calculateSMA = (prices: number[], period: number): number[] => {
@@ -48,24 +57,18 @@ export default async function handler(
         if (i < period - 1) {
           sma.push(NaN);
         } else {
-          const sum = prices.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
-          sma.push(sum / period);
+          let sum = 0, count = 0;
+          for (let j = i - period + 1; j <= i; j++) {
+            if (prices[j] != null) { sum += prices[j]; count++; }
+          }
+          sma.push(count > 0 ? sum / count : NaN);
         }
       }
       return sma;
     };
 
-    const sma50 = calculateSMA(chartPrices, 50);
-    const sma200 = calculateSMA(chartPrices, 200);
-
-    // Extract fundamentals
-    const fin = summary?.financialData || ({} as any);
-    const det = summary?.summaryDetail || ({} as any);
-    const prof = summary?.assetProfile || ({} as any);
-
-    const safeNum = (v: any) => (v != null && !isNaN(v) ? v : null);
-    const totalRevenue = safeNum(fin.totalRevenue);
-    const employees = safeNum(prof.fullTimeEmployees);
+    const sma50 = calculateSMA(closes, 50);
+    const sma200 = calculateSMA(closes, 200);
 
     // Format market cap
     const formatMarketCap = (value: number) => {
@@ -75,39 +78,41 @@ export default async function handler(
       return `${value.toLocaleString()}`;
     };
 
+    const totalRevenue = fundamentals?.totalRevenue;
+    const employees = fundamentals?.fullTimeEmployees;
+
     const responseData = {
-      ticker: ticker.toUpperCase(),
-      companyName: quote.shortName || quote.longName || ticker.toUpperCase(),
+      ticker: upperTicker,
+      companyName: quote.shortName || quote.longName || upperTicker,
       price: `${quote.regularMarketPrice?.toFixed(2) || 'N/A'}`,
       marketCap: quote.marketCap ? formatMarketCap(quote.marketCap) : 'N/A',
-      volume: quote.regularMarketVolume ? quote.regularMarketVolume.toLocaleString() : 'N/A',
+      volume: (quote as any).regularMarketVolume ? (quote as any).regularMarketVolume.toLocaleString() : 'N/A',
       peRatio: quote.trailingPE ? quote.trailingPE.toFixed(2) : 'N/A',
-      // Extended fundamentals
       fundamentals: {
-        roe: fin.returnOnEquity != null ? (fin.returnOnEquity * 100).toFixed(1) + '%' : 'N/A',
-        roa: fin.returnOnAssets != null ? (fin.returnOnAssets * 100).toFixed(1) + '%' : 'N/A',
-        debtToEquity: fin.debtToEquity != null ? fin.debtToEquity.toFixed(1) : 'N/A',
-        grossMargin: fin.grossMargins != null ? (fin.grossMargins * 100).toFixed(1) + '%' : 'N/A',
-        dividendYield: det.dividendYield != null ? (det.dividendYield * 100).toFixed(2) + '%' : 'N/A',
-        beta: det.beta != null ? det.beta.toFixed(2) : 'N/A',
+        roe: fundamentals?.returnOnEquity != null ? (fundamentals.returnOnEquity * 100).toFixed(1) + '%' : 'N/A',
+        roa: fundamentals?.returnOnAssets != null ? (fundamentals.returnOnAssets * 100).toFixed(1) + '%' : 'N/A',
+        debtToEquity: fundamentals?.debtToEquity != null ? fundamentals.debtToEquity.toFixed(1) : 'N/A',
+        grossMargin: fundamentals?.grossMargins != null ? (fundamentals.grossMargins * 100).toFixed(1) + '%' : 'N/A',
+        dividendYield: fundamentals?.dividendYield != null ? (fundamentals.dividendYield * 100).toFixed(2) + '%' : 'N/A',
+        beta: fundamentals?.beta != null ? fundamentals.beta.toFixed(2) : 'N/A',
         totalRevenue: totalRevenue ? formatMarketCap(totalRevenue) : 'N/A',
         revenuePerEmployee: (totalRevenue && employees && employees > 0)
           ? `$${Math.round(totalRevenue / employees).toLocaleString()}`
           : 'N/A',
         fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh ? `$${quote.fiftyTwoWeekHigh.toFixed(2)}` : 'N/A',
         fiftyTwoWeekLow: quote.fiftyTwoWeekLow ? `$${quote.fiftyTwoWeekLow.toFixed(2)}` : 'N/A',
-        sector: prof.sector || 'N/A',
-        industry: prof.industry || 'N/A',
+        sector: fundamentals?.sector || 'N/A',
+        industry: fundamentals?.industry || 'N/A',
         employees: employees ? employees.toLocaleString() : 'N/A',
       },
       chart: {
         data: [
           {
             x: chartDates,
-            y: chartPrices,
+            y: closes,
             type: 'scatter',
             mode: 'lines',
-            name: `${ticker.toUpperCase()} Price`,
+            name: `${upperTicker} Price`,
             line: { color: '#14b8a6', width: 2 },
             hovertemplate: '<b>%{fullData.name}</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
           },
@@ -131,7 +136,7 @@ export default async function handler(
           },
         ],
         layout: {
-          title: `${quote.shortName || ticker.toUpperCase()} - 10 Year Chart`,
+          title: `${quote.shortName || upperTicker} - 10 Year Chart`,
           xaxis: {
             title: 'Date',
             type: 'date',
