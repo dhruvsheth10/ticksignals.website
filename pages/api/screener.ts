@@ -33,30 +33,27 @@ export default async function handler(
         }
 
         // POST (manual trigger) or GET from Vercel Cron → run scan
-
         if (req.method === 'POST' || isVercelCron) {
-            const { subset } = req.body || {};
-            const subsetArg = subset ? ` ${subset}` : '';
-
-            console.log(`[Screener] Triggering scan${subset ? ` (subset: ${subset})` : ''}...`);
-
+            console.log('[Screener] Triggering scan...');
             const startTime = Date.now();
 
-            // Run the scan script as a child process (outside Next.js context)
             const scriptPath = join(process.cwd(), 'scripts', 'scan.py');
 
             try {
-                const output = execSync(`python3 "${scriptPath}"${subsetArg}`, {
+                // Check if script exists
+                if (!existsSync(scriptPath)) {
+                    throw new Error(`Script not found at ${scriptPath}`);
+                }
+
+                const output = execSync(`python3 "${scriptPath}"`, {
                     timeout: 300000, // 5 min timeout
                     encoding: 'utf-8',
                     cwd: process.cwd(),
-                    env: { ...process.env, NODE_ENV: 'production', PYTHONUNBUFFERED: '1' },
+                    env: { ...process.env },
                 });
 
-                // Log success
-                console.log('[Screener] Scan completed successfully');
+                console.log('[Screener] Scan output:', output);
 
-                // Read the results form cache
                 const cache = readCache();
                 const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
@@ -68,16 +65,15 @@ export default async function handler(
                     message: `${cache.totalStocks} stocks scanned in ${duration}s`,
                 });
             } catch (execErr: any) {
-                const stdout = execErr.stdout ? execErr.stdout.toString() : '';
-                const stderr = execErr.stderr ? execErr.stderr.toString() : '';
+                console.error('[Screener] Scan failed:', execErr.message);
 
-                console.error('[Screener] Scan execution failed:', execErr.message);
-                if (stderr) console.error('[Screener] Stderr:', stderr);
+                // Return the cached data even if scan fails
+                const cache = readCache();
 
                 return res.status(500).json({
                     error: 'Scan execution failed',
-                    details: stderr || execErr.message,
-                    stdout: stdout
+                    details: execErr.message,
+                    cached: cache.totalStocks,
                 });
             }
         }

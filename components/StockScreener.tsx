@@ -148,17 +148,18 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 body: JSON.stringify({}),
             });
             const data = await response.json();
-            if (data.success) {
-                setScanResult(`${data.processed} stocks scanned in ${data.durationSeconds}s`);
-                await fetchData(); // Refresh the data
+
+            if (response.ok && data.success) {
+                setScanResult(`✓ ${data.processed} stocks scanned in ${data.durationSeconds}s`);
+                await fetchData();
             } else {
-                // Show detailed error if available, truncated if too long
-                const errorMsg = data.details ? data.details.substring(0, 100) + (data.details.length > 100 ? '...' : '') : (data.error || 'Scan failed');
+                const errorMsg = data.details || data.error || 'Scan failed';
                 setScanResult(`Error: ${errorMsg}`);
-                console.error('Scan failed detailed:', data);
+                console.error('Scan failed:', data);
             }
         } catch (error: any) {
             setScanResult(`Error: ${error.message}`);
+            console.error('Scan error:', error);
         } finally {
             setScanning(false);
         }

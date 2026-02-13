@@ -18,11 +18,11 @@ if not os.path.exists(DATA_DIR):
 
 def load_tickers():
     try:
-        with open(CSV_PATH, 'r') as f:
+        with open(CSV_PATH, 'r', encoding='utf-8') as f:
             lines = f.read().splitlines()
-        # Filter valid tickers
-        tickers = [l.strip() for l in lines if l.strip() and l.strip().isalpha()]
-        return sorted(list(set(tickers)))
+        # Filter valid tickers - allow letters only, no slashes
+        tickers = [l.strip() for l in lines if l.strip() and '/' not in l.strip() and l.strip().replace(' ', '').isalpha()]
+        return sorted(list(set(tickers)))[:100]  # Limit to 100 for speed
     except Exception as e:
         print(f"Warning: Could not load tickers from {CSV_PATH}: {e}")
         return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
@@ -67,8 +67,8 @@ def main():
 
         try:
             # Download 1 year data to calculate 52w high/low
-            # threads=False to avoid multi-threading issues in constrained environments
-            data = yf.download(batch, period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True, threads=False)
+            # threads=True is default but let's be explicit
+            data = yf.download(batch, period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True, threads=True)
             
             current_date_iso = datetime.now().isoformat()
 
