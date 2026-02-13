@@ -152,7 +152,10 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 setScanResult(`${data.processed} stocks scanned in ${data.durationSeconds}s`);
                 await fetchData(); // Refresh the data
             } else {
-                setScanResult(`Error: ${data.error || 'Scan failed'}`);
+                // Show detailed error if available, truncated if too long
+                const errorMsg = data.details ? data.details.substring(0, 100) + (data.details.length > 100 ? '...' : '') : (data.error || 'Scan failed');
+                setScanResult(`Error: ${errorMsg}`);
+                console.error('Scan failed detailed:', data);
             }
         } catch (error: any) {
             setScanResult(`Error: ${error.message}`);
@@ -390,8 +393,8 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                         <button
                             onClick={() => setFiltersOpen(!filtersOpen)}
                             className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-all border ${hasActiveFilters
-                                    ? 'bg-aquamarine-500/10 border-aquamarine-500/30 text-aquamarine-400'
-                                    : 'bg-gray-800/50 border-gray-700/50 text-gray-400 hover:text-white'
+                                ? 'bg-aquamarine-500/10 border-aquamarine-500/30 text-aquamarine-400'
+                                : 'bg-gray-800/50 border-gray-700/50 text-gray-400 hover:text-white'
                                 }`}
                         >
                             <SlidersHorizontal size={14} />
@@ -421,8 +424,8 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
 
                 {scanResult && (
                     <div className={`mt-3 text-sm px-3 py-2 rounded-lg ${scanResult.startsWith('Error')
-                            ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                            : 'bg-green-500/10 text-green-400 border border-green-500/20'
+                        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                        : 'bg-green-500/10 text-green-400 border border-green-500/20'
                         }`}>
                         {scanResult}
                     </div>

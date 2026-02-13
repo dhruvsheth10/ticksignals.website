@@ -67,8 +67,8 @@ def main():
 
         try:
             # Download 1 year data to calculate 52w high/low
-            # threads=True is default but let's be explicit
-            data = yf.download(batch, period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True, threads=True)
+            # threads=False to avoid multi-threading issues in constrained environments
+            data = yf.download(batch, period="1y", interval="1d", progress=False, group_by='ticker', auto_adjust=True, threads=False)
             
             current_date_iso = datetime.now().isoformat()
 

@@ -33,6 +33,7 @@ export default async function handler(
         }
 
         // POST (manual trigger) or GET from Vercel Cron → run scan
+
         if (req.method === 'POST' || isVercelCron) {
             const { subset } = req.body || {};
             const subsetArg = subset ? ` ${subset}` : '';
@@ -41,20 +42,21 @@ export default async function handler(
 
             const startTime = Date.now();
 
+            // Run the scan script as a child process (outside Next.js context)
+            const scriptPath = join(process.cwd(), 'scripts', 'scan.py');
+
             try {
-                // Run the scan script as a child process (outside Next.js context)
-                // Using Python script for better Yahoo Finance handling (yfinance)
-                const scriptPath = join(process.cwd(), 'scripts', 'scan.py');
-                const output = execSync(`python3 ${scriptPath}${subsetArg}`, {
+                const output = execSync(`python3 "${scriptPath}"${subsetArg}`, {
                     timeout: 300000, // 5 min timeout
                     encoding: 'utf-8',
                     cwd: process.cwd(),
-                    env: { ...process.env, NODE_ENV: 'production' },
+                    env: { ...process.env, NODE_ENV: 'production', PYTHONUNBUFFERED: '1' },
                 });
 
-                console.log('[Screener] Scan output:', output);
+                // Log success
+                console.log('[Screener] Scan completed successfully');
 
-                // Read the results
+                // Read the results form cache
                 const cache = readCache();
                 const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
@@ -66,13 +68,16 @@ export default async function handler(
                     message: `${cache.totalStocks} stocks scanned in ${duration}s`,
                 });
             } catch (execErr: any) {
-                console.error('[Screener] Scan script error:', execErr.message);
-                if (execErr.stdout) console.log('[Screener] stdout:', execErr.stdout);
-                if (execErr.stderr) console.error('[Screener] stderr:', execErr.stderr);
+                const stdout = execErr.stdout ? execErr.stdout.toString() : '';
+                const stderr = execErr.stderr ? execErr.stderr.toString() : '';
+
+                console.error('[Screener] Scan execution failed:', execErr.message);
+                if (stderr) console.error('[Screener] Stderr:', stderr);
 
                 return res.status(500).json({
-                    error: 'Scan failed',
-                    details: execErr.message,
+                    error: 'Scan execution failed',
+                    details: stderr || execErr.message,
+                    stdout: stdout
                 });
             }
         }
