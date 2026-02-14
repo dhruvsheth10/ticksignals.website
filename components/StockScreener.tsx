@@ -49,10 +49,10 @@ interface FilterConfig {
 
 const DEFAULT_FILTERS: FilterConfig = {
     minPrice: '', maxPrice: '',
-    minMarketCap: '', maxMarketCap: '',
-    minPE: '', maxPE: '',
-    minROE: '', maxROE: '',
-    minDE: '', maxDE: '',
+    minMarketCap: 2000000000, maxMarketCap: '',
+    minPE: '', maxPE: 20,
+    minROE: 10, maxROE: '',
+    minDE: '', maxDE: 100,
     minGrossMargin: '', maxGrossMargin: '',
     minDividendYield: '', maxDividendYield: '',
     minROA: '', maxROA: '',
@@ -79,12 +79,6 @@ const PRESETS: { name: string; icon: any; desc: string; filters: Partial<FilterC
         icon: Percent,
         desc: 'High yield, low debt',
         filters: { minDividendYield: 2, maxDE: 150, minMarketCap: 1e9 },
-    },
-    {
-        name: 'Quality Filter',
-        icon: Zap,
-        desc: 'High ROA, ROE, low debt',
-        filters: { minROA: 10, minROE: 15, maxDE: 80, minGrossMargin: 30, minMarketCap: 10e9 },
     },
     {
         name: 'Large Cap Safe',
@@ -322,7 +316,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     };
 
     // Reusable filter input
-    const FilterInput = ({ label, filterKey, placeholder, prefix }: {
+    const FilterInput = useCallback(({ label, filterKey, placeholder, prefix }: {
         label: string; filterKey: keyof FilterConfig; placeholder: string; prefix?: string;
     }) => (
         <div className="flex flex-col gap-1">
@@ -332,18 +326,28 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                     <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 text-xs">{prefix}</span>
                 )}
                 <input
-                    type="number"
-                    value={filters[filterKey] as any}
-                    onChange={(e) => setFilters(prev => ({
-                        ...prev,
-                        [filterKey]: e.target.value === '' ? '' : parseFloat(e.target.value),
-                    }))}
+                    type="text"
+                    value={filters[filterKey] === '' ? '' : filters[filterKey]}
+                    onChange={(e) => {
+                        const val = e.target.value;
+                        setFilters(prev => ({
+                            ...prev,
+                            [filterKey]: val === '' ? '' : val,
+                        }));
+                    }}
+                    onBlur={(e) => {
+                        const val = e.target.value;
+                        const num = parseFloat(val);
+                        if (val !== '' && !isNaN(num)) {
+                            setFilters(prev => ({ ...prev, [filterKey]: num }));
+                        }
+                    }}
                     placeholder={placeholder}
                     className={`w-full bg-gray-900/60 border border-gray-700/50 rounded-lg ${prefix ? 'pl-6' : 'pl-3'} pr-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-aquamarine-500/50 focus:border-aquamarine-500/50 transition-all`}
                 />
             </div>
         </div>
-    );
+    ), [filters]);
 
     const SortHeader = ({ label, colKey, className = '' }: { label: string; colKey: SortKey; className?: string }) => (
         <th
