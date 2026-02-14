@@ -139,13 +139,16 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     };
 
     const runScreener = async () => {
+        const password = window.prompt("Enter admin password to run scan:");
+        if (password === null) return; // User cancelled
+
         setScanning(true);
-        setScanResult('');
+        setScanResult('Initializing...');
         try {
             const response = await fetch('/api/screener', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}),
+                body: JSON.stringify({ password }),
             });
             const data = await response.json();
 

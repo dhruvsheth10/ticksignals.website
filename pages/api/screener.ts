@@ -1,5 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import crypto from 'crypto';
 import { TICKER_LIST } from '../../lib/tickers';
+
+const SCAN_PASSWORD_HASH = 'ea4de091b760a4e538140c342585130649e646c54d4939ae7f142bb81d5506fa';
 import { initScreenerTable, upsertScreenerRow, getScreenerData, getScanMetadata } from '../../lib/db';
 import https from 'https';
 
@@ -172,6 +175,18 @@ export default async function handler(
 
         // ── POST / Cron: run scan ──
         if (req.method === 'POST' || isVercelCron) {
+            // Password Check (skip for Cron)
+            if (!isVercelCron) {
+                const { password } = req.body;
+                if (!password) {
+                    return res.status(401).json({ error: 'Password required' });
+                }
+                const hash = crypto.createHash('sha256').update(password).digest('hex');
+                if (hash !== SCAN_PASSWORD_HASH) {
+                    return res.status(401).json({ error: 'Invalid password' });
+                }
+            }
+
             console.log('[Screener] Starting scan...');
             const startTime = Date.now();
             await initScreenerTable();
