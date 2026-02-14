@@ -145,7 +145,7 @@ const LivePortfolio = () => {
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }}
                                         itemStyle={{ color: '#10b981' }}
-                                        formatter={(val: number) => [`$${val.toLocaleString()}`, 'Value']}
+                                        formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString()}`, 'Value'] as [string, string]}
                                         labelFormatter={(label) => new Date(label).toLocaleDateString()}
                                     />
                                     <Area

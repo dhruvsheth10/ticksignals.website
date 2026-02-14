@@ -1,7 +1,7 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { runTradingCycle, isMarketOpen } from '../../lib/trading-engine';
-import { initPortfolioTables } from '../../lib/portfolio-db';
+import { runTradingCycle, isMarketOpen } from '../../../lib/trading-engine';
+import { initPortfolioTables } from '../../../lib/portfolio-db';
 
 export default async function handler(
     req: NextApiRequest,
