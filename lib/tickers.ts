@@ -23,8 +23,7 @@ function loadTickersFromCSV(): string[] {
         return uniqueTickers.sort();
     } catch (error) {
         console.error('Error loading tickers from CSV:', error);
-        // Fallback to a minimal list if CSV can't be read
-        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'];
+        return [];
     }
 }
 
