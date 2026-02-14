@@ -114,9 +114,9 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     const [scanning, setScanning] = useState(false);
     const [scanResult, setScanResult] = useState<string>('');
     const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-    const [filters, setFilters] = useState<FilterConfig>(DEFAULT_FILTERS);
-    const [sortKey, setSortKey] = useState<SortKey>('market_cap');
-    const [sortDir, setSortDir] = useState<SortDir>('desc');
+    const [filters, setFilters] = useState<FilterConfig>(EMPTY_FILTERS);
+    const [sortKey, setSortKey] = useState<SortKey>('ticker');
+    const [sortDir, setSortDir] = useState<SortDir>('asc');
     const [filtersOpen, setFiltersOpen] = useState(true);
     const [activeSectors, setActiveSectors] = useState<string[]>([]);
 
@@ -251,6 +251,8 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
 
     const resetFilters = () => {
         setFilters(EMPTY_FILTERS);
+        setSortKey('ticker');
+        setSortDir('asc');
     };
 
     const hasActiveFilters = JSON.stringify(filters) !== JSON.stringify(EMPTY_FILTERS);
@@ -477,8 +479,8 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                                     key={preset.name}
                                     onClick={() => applyPreset(preset)}
                                     className={`group flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${isActive
-                                            ? 'bg-aquamarine-500/10 border-aquamarine-500/40 text-aquamarine-300'
-                                            : 'bg-gray-800/50 border-gray-700/30 hover:border-aquamarine-500/30 hover:bg-aquamarine-500/5'
+                                        ? 'bg-aquamarine-500/10 border-aquamarine-500/40 text-aquamarine-300'
+                                        : 'bg-gray-800/50 border-gray-700/30 hover:border-aquamarine-500/30 hover:bg-aquamarine-500/5'
                                         }`}
                                     title={preset.desc}
                                 >
