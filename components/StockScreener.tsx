@@ -47,6 +47,19 @@ interface FilterConfig {
     searchQuery: string;
 }
 
+const EMPTY_FILTERS: FilterConfig = {
+    minPrice: '', maxPrice: '',
+    minMarketCap: '', maxMarketCap: '',
+    minPE: '', maxPE: '',
+    minROE: '', maxROE: '',
+    minDE: '', maxDE: '',
+    minGrossMargin: '', maxGrossMargin: '',
+    minDividendYield: '', maxDividendYield: '',
+    minROA: '', maxROA: '',
+    sector: '',
+    searchQuery: '',
+};
+
 const DEFAULT_FILTERS: FilterConfig = {
     minPrice: '', maxPrice: '',
     minMarketCap: 2000000000, maxMarketCap: '',
@@ -237,10 +250,21 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     };
 
     const resetFilters = () => {
-        setFilters(DEFAULT_FILTERS);
+        setFilters(EMPTY_FILTERS);
     };
 
-    const hasActiveFilters = JSON.stringify(filters) !== JSON.stringify(DEFAULT_FILTERS);
+    const hasActiveFilters = JSON.stringify(filters) !== JSON.stringify(EMPTY_FILTERS);
+
+    // Check which preset is active
+    const getActivePreset = () => {
+        for (const preset of PRESETS) {
+            const presetFilters = { ...EMPTY_FILTERS, ...preset.filters };
+            if (JSON.stringify(filters) === JSON.stringify(presetFilters)) {
+                return preset.name;
+            }
+        }
+        return null;
+    };
 
     // Format helpers
     const fmtPrice = (v: number | null) => v != null ? `$${v.toFixed(2)}` : '—';
@@ -447,15 +471,21 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                     <div className="flex flex-wrap gap-2 mb-5">
                         {PRESETS.map((preset) => {
                             const Icon = preset.icon;
+                            const isActive = getActivePreset() === preset.name;
                             return (
                                 <button
                                     key={preset.name}
                                     onClick={() => applyPreset(preset)}
-                                    className="group flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/50 border border-gray-700/30 hover:border-aquamarine-500/30 hover:bg-aquamarine-500/5 transition-all"
+                                    className={`group flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${isActive
+                                            ? 'bg-aquamarine-500/10 border-aquamarine-500/40 text-aquamarine-300'
+                                            : 'bg-gray-800/50 border-gray-700/30 hover:border-aquamarine-500/30 hover:bg-aquamarine-500/5'
+                                        }`}
                                     title={preset.desc}
                                 >
-                                    <Icon size={14} className="text-aquamarine-400 opacity-60 group-hover:opacity-100 transition-opacity" />
-                                    <span className="text-xs font-medium text-gray-300 group-hover:text-white transition-colors">{preset.name}</span>
+                                    <Icon size={14} className={`transition-opacity ${isActive ? 'text-aquamarine-400 opacity-100' : 'text-aquamarine-400 opacity-60 group-hover:opacity-100'
+                                        }`} />
+                                    <span className={`text-xs font-medium transition-colors ${isActive ? 'text-aquamarine-200' : 'text-gray-300 group-hover:text-white'
+                                        }`}>{preset.name}</span>
                                 </button>
                             );
                         })}
@@ -465,7 +495,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/5 border border-red-500/20 text-red-400 hover:bg-red-500/10 transition-all text-xs font-medium"
                             >
                                 <X size={12} />
-                                Reset
+                                Clear All
                             </button>
                         )}
                     </div>
