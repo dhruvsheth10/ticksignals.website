@@ -26,7 +26,7 @@ export default function Layout({ children }: LayoutProps) {
                 TickSignals
               </span>
             </div>
-            
+
           </div>
         </div>
       </header>
@@ -40,7 +40,7 @@ export default function Layout({ children }: LayoutProps) {
       <footer className="relative border-t border-gray-800/50 mt-32">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="text-center text-gray-400 text-sm">
-            <p>© 2025 TickSignals. Made by Dhruv and papa</p>
+            <p>© 2026 TickSignals. Made by Dhruv and papa</p>
             <p className="mt-2">Not financial advice. Trade at your own risk.</p>
           </div>
         </div>

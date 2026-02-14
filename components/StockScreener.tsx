@@ -544,7 +544,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 {loading ? (
                     <div className="text-center py-16">
                         <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-aquamarine-400"></div>
-                        <p className="text-gray-400 mt-4">Loading screener data...</p>
+                        <p className="text-gray-400 mt-4">Loading data...</p>
                     </div>
                 ) : filteredStocks.length === 0 ? (
                     <div className="text-center py-16">

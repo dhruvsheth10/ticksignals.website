@@ -7,8 +7,16 @@
   ],
   "crons": [
     {
-      "path": "/api/screener",
-      "schedule": "30 14 * * *"
+      "path": "/api/cron/trade?type=OPEN",
+      "schedule": "30 14 * * 1-5"
+    },
+    {
+      "path": "/api/cron/trade?type=MID",
+      "schedule": "0 17 * * 1-5"
+    },
+    {
+      "path": "/api/cron/trade?type=CLOSE",
+      "schedule": "30 20 * * 1-5"
     }
   ],
   "headers": [

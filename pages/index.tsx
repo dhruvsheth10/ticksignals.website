@@ -1,22 +1,15 @@
 import { useState, useEffect } from 'react';
 import Head from 'next/head';
-import { Search, BarChart3 } from 'lucide-react';
+import { Search, BarChart3, Activity } from 'lucide-react';
 import Layout from '../components/Layout';
 import TickerAnalyzer from '../components/TickerAnalyzer';
 import StockScreener from '../components/StockScreener';
+import LivePortfolio from '../components/LivePortfolio';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('screener');
-  const [stockCount, setStockCount] = useState(0);
+
   const [selectedTicker, setSelectedTicker] = useState<string>('');
-
-  useEffect(() => {
-    fetch('/api/stats')
-      .then(res => res.json())
-      .then(data => setStockCount(data.totalStocks || 0))
-      .catch(err => console.error('Failed to fetch stats:', err));
-  }, []);
-
   const handleTickerClick = (ticker: string) => {
     setSelectedTicker(ticker);
     setActiveTab('analyzer');
@@ -25,12 +18,13 @@ export default function Home() {
   const tabs = [
     { id: 'screener', label: 'Stock Screener', icon: BarChart3 },
     { id: 'analyzer', label: 'Ticker Analyzer', icon: Search },
+    { id: 'portfolio', label: 'Live Portfolio', icon: Activity },
   ];
 
   return (
     <>
       <Head>
-        <title>TickSignals - Stock Screener & Analysis</title>
+        <title>TickSignals :&#41;</title>
         <meta name="description" content="Professional stock screener with real-time fundamental data and configurable filters" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="icon" href="/favicon.ico" sizes="any" />
@@ -46,9 +40,6 @@ export default function Home() {
               <h1 className="text-5xl sm:text-6xl md:text-7xl font-bold bg-gradient-to-r from-aquamarine-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent mb-4 pb-2">
                 TickSignals
               </h1>
-              <p className="text-gray-400 text-base sm:text-lg max-w-xl mx-auto">
-                Screen {stockCount > 0 ? `${stockCount}+` : ''} stocks by fundamentals. Filter by P/E, ROE, margins & more.
-              </p>
             </div>
           </div>
         </div>
@@ -63,8 +54,8 @@ export default function Home() {
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
                   className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-all text-sm ${activeTab === tab.id
-                      ? 'bg-aquamarine-600 text-white shadow-lg shadow-aquamarine-500/50'
-                      : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
+                    ? 'bg-aquamarine-600 text-white shadow-lg shadow-aquamarine-500/50'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50'
                     }`}
                 >
                   <Icon size={16} />
@@ -80,6 +71,7 @@ export default function Home() {
           <div className="animate-slide-up">
             {activeTab === 'screener' && <StockScreener onTickerClick={handleTickerClick} />}
             {activeTab === 'analyzer' && <TickerAnalyzer initialTicker={selectedTicker} />}
+            {activeTab === 'portfolio' && <LivePortfolio />}
           </div>
         </div>
       </Layout>

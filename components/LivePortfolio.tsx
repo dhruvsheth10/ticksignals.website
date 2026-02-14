@@ -1,0 +1,269 @@
+
+import React, { useState, useEffect } from 'react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity } from 'lucide-react';
+
+interface PortfolioData {
+    status: {
+        cash_balance: number;
+        total_equity: number;
+        total_value: number;
+        last_updated: string;
+    };
+    holdings: {
+        ticker: string;
+        shares: number;
+        avg_cost: number;
+        current_price: number;
+        market_value: number;
+        return_pct: number;
+    }[];
+    transactions: {
+        date: string;
+        ticker: string;
+        type: 'BUY' | 'SELL';
+        shares: number;
+        price: number;
+        total_amount: number;
+    }[];
+    history: {
+        date: string;
+        total_value: number;
+    }[];
+}
+
+const LivePortfolio = () => {
+    const [data, setData] = useState<PortfolioData | null>(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        fetchPortfolio();
+    }, []);
+
+    const fetchPortfolio = async () => {
+        try {
+            setLoading(true);
+            const res = await fetch('/api/portfolio');
+            const json = await res.json();
+            setData(json);
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (loading) return (
+        <div className="flex justify-center items-center h-64 text-aquamarine-400 animate-pulse">
+            <Activity className="w-8 h-8 mr-2" /> Loading Live Portfolio...
+        </div>
+    );
+
+    if (!data) return <div className="text-center text-gray-500 py-10">Portfolio data unavailable.</div>;
+
+    const totalValue = data.status.total_value;
+    const cash = data.status.cash_balance;
+    const equity = data.status.total_equity;
+    const startValue = 100000;
+    const totalReturn = ((totalValue - startValue) / startValue) * 100;
+    const isPositive = totalReturn >= 0;
+
+    return (
+        <div className="space-y-6 animate-fade-in">
+            {/* Top Summary Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Total Value Card */}
+                <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6 relative overflow-hidden group hover:border-aquamarine-500/30 transition-all">
+                    <div className="absolute inset-0 bg-gradient-to-br from-aquamarine-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                    <h3 className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-2">
+                        <Activity size={16} /> Total Portfolio Value
+                    </h3>
+                    <div className="text-3xl font-bold text-white flex items-baseline gap-2">
+                        ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        <span className={`text-sm font-medium px-2 py-0.5 rounded-full ${isPositive ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                            {isPositive ? '+' : ''}{totalReturn.toFixed(2)}%
+                        </span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">Started with $100,000.00</p>
+                </div>
+
+                {/* Cash vs Equity */}
+                <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6 flex flex-col justify-center">
+                    <div className="flex justify-between items-center mb-2">
+                        <span className="text-gray-400 text-sm">Cash Balance</span>
+                        <span className="text-white font-mono">${cash.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    </div>
+                    <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden mb-4">
+                        <div className="bg-emerald-400 h-full" style={{ width: `${(cash / totalValue) * 100}%` }}></div>
+                    </div>
+                    <div className="flex justify-between items-center mb-2">
+                        <span className="text-gray-400 text-sm">Equity (Stocks)</span>
+                        <span className="text-white font-mono">${equity.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    </div>
+                    <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
+                        <div className="bg-blue-500 h-full" style={{ width: `${(equity / totalValue) * 100}%` }}></div>
+                    </div>
+                </div>
+
+                {/* Quick Stats or Small Chart */}
+                {/* For now, just a placeholder or extra stat */}
+                <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6 flex flex-col justify-center items-center text-center">
+                    <PieChart className="w-8 h-8 text-aquamarine-400 mb-2" />
+                    <div className="text-2xl font-bold text-white">{data.holdings.length}</div>
+                    <div className="text-sm text-gray-400">Active Positions</div>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Left Column: Chart & Holdings (2/3 width) */}
+                <div className="lg:col-span-2 space-y-6">
+
+                    {/* Chart Section */}
+                    <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl p-6">
+                        <h3 className="text-lg font-bold text-white mb-4">Portfolio Growth</h3>
+                        <div className="h-[300px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <AreaChart data={data.history}>
+                                    <defs>
+                                        <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                        </linearGradient>
+                                    </defs>
+                                    <XAxis
+                                        dataKey="date"
+                                        tickFormatter={(str) => new Date(str).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                                        stroke="#4b5563"
+                                        fontSize={12}
+                                    />
+                                    <YAxis
+                                        domain={['auto', 'auto']}
+                                        tickFormatter={(val) => `$${(val / 1000).toFixed(0)}k`}
+                                        stroke="#4b5563"
+                                        fontSize={12}
+                                    />
+                                    <Tooltip
+                                        contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }}
+                                        itemStyle={{ color: '#10b981' }}
+                                        formatter={(val: number) => [`$${val.toLocaleString()}`, 'Value']}
+                                        labelFormatter={(label) => new Date(label).toLocaleDateString()}
+                                    />
+                                    <Area
+                                        type="monotone"
+                                        dataKey="total_value"
+                                        stroke="#10b981"
+                                        strokeWidth={2}
+                                        fillOpacity={1}
+                                        fill="url(#colorValue)"
+                                    />
+                                </AreaChart>
+                            </ResponsiveContainer>
+                        </div>
+                    </div>
+
+                    {/* Holdings Table */}
+                    <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
+                        <div className="p-4 border-b border-gray-700/50 flex justify-between items-center">
+                            <h3 className="text-lg font-bold text-white">Current Holdings</h3>
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse">
+                                <thead>
+                                    <tr className="bg-gray-700/30 text-gray-400 text-sm">
+                                        <th className="p-4 font-medium">Ticker</th>
+                                        <th className="p-4 font-medium text-right">Shares</th>
+                                        <th className="p-4 font-medium text-right">Avg Cost</th>
+                                        <th className="p-4 font-medium text-right">Price</th>
+                                        <th className="p-4 font-medium text-right">Value</th>
+                                        <th className="p-4 font-medium text-right">Return</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-700/50">
+                                    {data.holdings.length === 0 ? (
+                                        <tr>
+                                            <td colSpan={6} className="p-8 text-center text-gray-500">
+                                                No active holdings. Waiting for next trading cycle.
+                                            </td>
+                                        </tr>
+                                    ) : (
+                                        data.holdings.map((h) => {
+                                            const isProfitable = h.return_pct >= 0;
+                                            return (
+                                                <tr key={h.ticker} className="hover:bg-gray-700/20 transition-colors">
+                                                    <td className="p-4 font-bold text-white">{h.ticker}</td>
+                                                    <td className="p-4 text-right text-gray-300">{h.shares.toFixed(2)}</td>
+                                                    <td className="p-4 text-right text-gray-400">${h.avg_cost.toFixed(2)}</td>
+                                                    <td className="p-4 text-right text-white">${h.current_price.toFixed(2)}</td>
+                                                    <td className="p-4 text-right text-white font-medium">${h.market_value.toLocaleString()}</td>
+                                                    <td className={`p-4 text-right font-bold ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                                                        {isProfitable ? '+' : ''}{h.return_pct.toFixed(2)}%
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Right Column: Transactions (1/3 width) */}
+                <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden flex flex-col h-full max-h-[800px]">
+                    <div className="p-4 border-b border-gray-700/50 bg-gray-800/80 sticky top-0 z-10">
+                        <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                            <HistoryIcon />
+                            Trade History
+                        </h3>
+                    </div>
+                    <div className="overflow-y-auto flex-1 p-0 custom-scrollbar">
+                        {data.transactions.length === 0 ? (
+                            <div className="p-8 text-center text-gray-500">No transactions recorded yet.</div>
+                        ) : (
+                            <div className="divide-y divide-gray-700/50">
+                                {data.transactions.map((tx, idx) => (
+                                    <div key={idx} className="p-4 hover:bg-gray-700/20 transition-colors flex justify-between items-start">
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                                    }`}>
+                                                    {tx.type}
+                                                </span>
+                                                <span className="font-bold text-white">{tx.ticker}</span>
+                                            </div>
+                                            <div className="text-xs text-gray-500">
+                                                {new Date(tx.date).toLocaleString(undefined, {
+                                                    month: 'short', day: 'numeric',
+                                                    hour: 'numeric', minute: 'numeric'
+                                                })}
+                                            </div>
+                                        </div>
+                                        <div className="text-right">
+                                            <div className="text-sm text-gray-200">
+                                                {tx.shares.toFixed(0)} @ ${tx.price.toFixed(2)}
+                                            </div>
+                                            <div className="text-xs text-gray-500">
+                                                ${tx.total_amount.toLocaleString()}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// Simple Icon Component (internal to avoid extra deps if lucide not imported or mismatch)
+const HistoryIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 12" />
+        <path d="M3 3v9h9" />
+        <path d="M12 7v5l4 2" />
+    </svg>
+);
+
+export default LivePortfolio;
