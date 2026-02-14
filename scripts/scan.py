@@ -22,7 +22,7 @@ def load_tickers():
             lines = f.read().splitlines()
         # Filter valid tickers - allow letters only, no slashes
         tickers = [l.strip() for l in lines if l.strip() and '/' not in l.strip() and l.strip().replace(' ', '').isalpha()]
-        return sorted(list(set(tickers)))[:100]  # Limit to 100 for speed
+        return sorted(list(set(tickers)))
     except Exception as e:
         print(f"Warning: Could not load tickers from {CSV_PATH}: {e}")
         return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']

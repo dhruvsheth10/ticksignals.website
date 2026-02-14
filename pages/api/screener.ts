@@ -58,36 +58,62 @@ export default async function handler(
 
             let totalProcessed = 0;
             let totalFailed = 0;
+            const errors: string[] = [];
 
             // ── Phase 1: Batch quote() for price, mcap, P/E, 52wk, divYield ──
-            // quote() accepts string[] → one API call per batch of ~50 symbols
-            const QUOTE_BATCH = 50;
+            const QUOTE_BATCH = 40;
             const quoteMap: Record<string, any> = {};
 
             for (let i = 0; i < allTickers.length; i += QUOTE_BATCH) {
                 const batch = allTickers.slice(i, i + QUOTE_BATCH);
                 try {
-                    const quotes: any[] = await yf.quote(batch, {}, { validateResult: false });
-                    if (Array.isArray(quotes)) {
-                        for (const q of quotes) {
+                    // Pass validateResult: false in moduleOptions (3rd arg)
+                    const quotes = await yf.quote(batch, {}, { validateResult: false });
+                    const arr = Array.isArray(quotes) ? quotes : [quotes];
+                    let batchHits = 0;
+                    for (const q of arr) {
+                        if (q && q.symbol) {
+                            quoteMap[q.symbol] = q;
+                            batchHits++;
+                        }
+                    }
+                    console.log(`[Screener] Batch ${i}–${i + batch.length}: ${batchHits}/${batch.length} quotes`);
+                } catch (err: any) {
+                    const msg = `Batch ${i}–${i + batch.length} failed: ${err.message}`;
+                    console.error(`[Screener] ${msg}`);
+                    errors.push(msg);
+
+                    // Fallback: try individual quotes for this batch
+                    for (const ticker of batch) {
+                        try {
+                            const q = await yf.quote(ticker, {}, { validateResult: false });
                             if (q && q.symbol) {
                                 quoteMap[q.symbol] = q;
                             }
+                        } catch {
+                            // Skip silently
                         }
                     }
-                    console.log(`[Screener] Batch quote ${i}–${i + batch.length}: ${Object.keys(quoteMap).length - i > 0 ? 'ok' : 'partial'}`);
-                } catch (err: any) {
-                    console.warn(`[Screener] Batch quote ${i}–${i + batch.length} failed: ${err.message}`);
+                    console.log(`[Screener] Fallback for batch: ${Object.keys(quoteMap).length} total quotes so far`);
                 }
                 if (i + QUOTE_BATCH < allTickers.length) {
-                    await sleep(300);
+                    await sleep(500);
                 }
             }
 
-            console.log(`[Screener] Phase 1 done: ${Object.keys(quoteMap).length} quotes`);
+            const quoteCount = Object.keys(quoteMap).length;
+            console.log(`[Screener] Phase 1 complete: ${quoteCount} quotes from ${allTickers.length} tickers`);
 
-            // ── Phase 2: quoteSummary() for fundamentals (ROE, ROA, margins, sector) ──
-            // These are individual calls, so we throttle carefully
+            if (quoteCount === 0) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'No quotes returned from Yahoo Finance',
+                    details: errors.length > 0 ? errors.join('; ') : 'All batch quote calls returned empty results',
+                    total: allTickers.length,
+                });
+            }
+
+            // ── Phase 2: quoteSummary() for fundamentals ──
             const tickersWithQuotes = Object.keys(quoteMap);
             const FUND_CONCURRENCY = 5;
             const fundMap: Record<string, any> = {};
@@ -97,10 +123,12 @@ export default async function handler(
                 const results = await Promise.allSettled(
                     batch.map(async (ticker) => {
                         try {
-                            const summary = await yf.quoteSummary(ticker, {
-                                modules: ['financialData', 'summaryDetail', 'assetProfile'],
-                            });
-                            return { ticker, data: summary };
+                            return {
+                                ticker,
+                                data: await yf.quoteSummary(ticker, {
+                                    modules: ['financialData', 'summaryDetail', 'assetProfile'],
+                                }),
+                            };
                         } catch {
                             return { ticker, data: null };
                         }
@@ -114,14 +142,13 @@ export default async function handler(
                 if (i + FUND_CONCURRENCY < tickersWithQuotes.length) {
                     await sleep(400);
                 }
-                // Progress log every 50
                 const done = Math.min(i + FUND_CONCURRENCY, tickersWithQuotes.length);
                 if (done % 50 === 0 || done >= tickersWithQuotes.length) {
                     console.log(`[Screener] Fundamentals: ${done}/${tickersWithQuotes.length}`);
                 }
             }
 
-            console.log(`[Screener] Phase 2 done: ${Object.keys(fundMap).length} fundamentals`);
+            console.log(`[Screener] Phase 2 complete: ${Object.keys(fundMap).length} fundamentals`);
 
             // ── Phase 3: Upsert into DB ──
             for (const ticker of tickersWithQuotes) {
@@ -166,7 +193,7 @@ export default async function handler(
             }
 
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`[Screener] ✅ Scan complete: ${totalProcessed} ok, ${totalFailed} failed in ${duration}s`);
+            console.log(`[Screener] ✅ Done: ${totalProcessed} ok, ${totalFailed} failed in ${duration}s`);
 
             return res.status(200).json({
                 success: true,
@@ -175,6 +202,7 @@ export default async function handler(
                 total: allTickers.length,
                 durationSeconds: duration,
                 message: `${totalProcessed} stocks scanned in ${duration}s`,
+                errors: errors.length > 0 ? errors : undefined,
             });
         }
 
