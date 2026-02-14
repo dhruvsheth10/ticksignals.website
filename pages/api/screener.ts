@@ -9,107 +9,137 @@ function sleep(ms: number): Promise<void> {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-// ── Direct HTTPS GET (no crumb needed) ──
-function httpsGet(url: string): Promise<{ statusCode: number; body: string }> {
+// ── Low-level HTTPS helpers ──
+function rawGet(url: string, headers: Record<string, string> = {}): Promise<{
+    statusCode: number;
+    headers: Record<string, string | string[] | undefined>;
+    body: string;
+}> {
     return new Promise((resolve, reject) => {
-        const req = https.get(url, { headers: { 'User-Agent': UA } }, (res) => {
+        const req = https.get(url, {
+            headers: { 'User-Agent': UA, ...headers },
+        }, (res) => {
             let body = '';
             res.on('data', (chunk: Buffer) => (body += chunk));
-            res.on('end', () => resolve({ statusCode: res.statusCode || 0, body }));
+            res.on('end', () => resolve({
+                statusCode: res.statusCode || 0,
+                headers: res.headers as any,
+                body,
+            }));
         });
         req.on('error', reject);
         req.setTimeout(15000, () => req.destroy(new Error('timeout')));
     });
 }
 
-// ── Fetch quote data via v8 chart (NO crumb required) ──
-interface ChartData {
-    symbol: string;
-    price: number;
-    fiftyTwoWeekHigh: number;
-    fiftyTwoWeekLow: number;
-    volume: number;
-    name: string;
-    marketCap?: number;
-    pe?: number;
-    dividendYield?: number;
+// ── Yahoo Session: get cookie + crumb once, reuse for all requests ──
+interface YahooSession {
+    cookie: string;
+    crumb: string;
 }
 
-async function fetchChart(symbol: string): Promise<ChartData | null> {
+async function getYahooSession(retries = 3): Promise<YahooSession | null> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            // Step 1: Get session cookies
+            const initRes = await rawGet('https://fc.yahoo.com/');
+            const rawCookies = initRes.headers['set-cookie'];
+            let cookie = '';
+            if (rawCookies) {
+                const arr = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
+                cookie = arr.map(c => c.split(';')[0]).join('; ');
+            }
+            if (!cookie) {
+                console.warn(`[Yahoo] No cookies (attempt ${attempt})`);
+                await sleep(2000 * attempt);
+                continue;
+            }
+
+            // Step 2: Get crumb using cookies
+            const crumbRes = await rawGet(
+                'https://query2.finance.yahoo.com/v1/test/getcrumb',
+                { Cookie: cookie }
+            );
+
+            if (crumbRes.statusCode === 429) {
+                console.warn(`[Yahoo] Crumb rate limited (attempt ${attempt}), waiting...`);
+                await sleep(5000 * attempt);
+                continue;
+            }
+            if (crumbRes.statusCode !== 200) {
+                console.warn(`[Yahoo] Crumb status ${crumbRes.statusCode} (attempt ${attempt})`);
+                await sleep(3000 * attempt);
+                continue;
+            }
+
+            console.log('[Yahoo] Session established');
+            return { cookie, crumb: crumbRes.body };
+        } catch (err: any) {
+            console.warn(`[Yahoo] Session attempt ${attempt} failed: ${err.message}`);
+            if (attempt < retries) await sleep(3000 * attempt);
+        }
+    }
+    return null;
+}
+
+// ── Batch v7 quote with existing session (up to ~50 symbols per call) ──
+async function batchQuoteV7(
+    symbols: string[],
+    session: YahooSession
+): Promise<any[]> {
+    const symbolStr = symbols.join(',');
+    const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbolStr)}&crumb=${encodeURIComponent(session.crumb)}`;
+
+    const res = await rawGet(url, { Cookie: session.cookie });
+
+    if (res.statusCode === 429) {
+        throw new Error('rate-limited');
+    }
+    if (res.statusCode === 401 || res.statusCode === 403) {
+        throw new Error('auth-expired');
+    }
+    if (res.statusCode !== 200) {
+        throw new Error(`status ${res.statusCode}`);
+    }
+
+    const data = JSON.parse(res.body);
+    return data.quoteResponse?.result || [];
+}
+
+// ── v8 chart fallback (no auth needed) ──
+async function chartQuote(symbol: string): Promise<any | null> {
     try {
-        const res = await httpsGet(
-            `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d&includePrePost=false`
+        const res = await rawGet(
+            `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`
         );
-        if (res.statusCode === 429) return null; // rate-limited
         if (res.statusCode !== 200) return null;
-
-        const data = JSON.parse(res.body);
-        const meta = data.chart?.result?.[0]?.meta;
-        if (!meta || !meta.regularMarketPrice) return null;
-
+        const meta = JSON.parse(res.body).chart?.result?.[0]?.meta;
+        if (!meta?.regularMarketPrice) return null;
         return {
             symbol: meta.symbol || symbol,
-            price: meta.regularMarketPrice,
-            fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? null,
-            fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? null,
-            volume: meta.regularMarketVolume ?? 0,
-            name: meta.longName || meta.shortName || symbol,
+            regularMarketPrice: meta.regularMarketPrice,
+            fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
+            fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
+            regularMarketVolume: meta.regularMarketVolume,
+            longName: meta.longName,
+            shortName: meta.shortName,
         };
     } catch {
         return null;
     }
 }
 
-// ── Fetch fundamentals via v10 quoteSummary (public, no crumb) ──
-interface Fundamentals {
-    pe_ratio: number | null;
-    market_cap: number | null;
-    roe: number | null;
-    roa: number | null;
-    debtToEquity: number | null;
-    grossMargins: number | null;
-    dividendYield: number | null;
-    totalRevenue: number | null;
-    fullTimeEmployees: number | null;
-    sector: string | null;
-    industry: string | null;
-    beta: number | null;
-    longName: string | null;
-}
-
-async function fetchFundamentals(symbol: string): Promise<Fundamentals | null> {
+// ── v10 quoteSummary with session (for fundamentals) ──
+async function quoteSummary(
+    symbol: string,
+    session: YahooSession
+): Promise<any | null> {
     try {
-        // v10 quoteSummary – public endpoint, no crumb needed
-        const res = await httpsGet(
-            `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=financialData,summaryDetail,assetProfile,defaultKeyStatistics,price`
-        );
-        if (res.statusCode === 429 || res.statusCode !== 200) return null;
-
+        const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=financialData,summaryDetail,assetProfile,defaultKeyStatistics,price&crumb=${encodeURIComponent(session.crumb)}`;
+        const res = await rawGet(url, { Cookie: session.cookie });
+        if (res.statusCode !== 200) return null;
         const data = JSON.parse(res.body);
-        const result = data.quoteSummary?.result?.[0];
-        if (!result) return null;
-
-        const fin = result.financialData || {};
-        const det = result.summaryDetail || {};
-        const prof = result.assetProfile || {};
-        const ks = result.defaultKeyStatistics || {};
-        const pr = result.price || {};
-
-        return {
-            pe_ratio: det.trailingPE?.raw ?? ks.trailingPE?.raw ?? null,
-            market_cap: pr.marketCap?.raw ?? det.marketCap?.raw ?? null,
-            roe: fin.returnOnEquity?.raw ?? null,
-            roa: fin.returnOnAssets?.raw ?? null,
-            debtToEquity: fin.debtToEquity?.raw ?? null,
-            grossMargins: fin.grossMargins?.raw ?? null,
-            dividendYield: det.dividendYield?.raw ?? null,
-            totalRevenue: fin.totalRevenue?.raw ?? null,
-            fullTimeEmployees: prof.fullTimeEmployees ?? null,
-            sector: prof.sector || null,
-            industry: prof.industry || null,
-            beta: det.beta?.raw ?? null,
-            longName: pr.longName || pr.shortName || null,
-        };
+        return data.quoteSummary?.result?.[0] || null;
     } catch {
         return null;
     }
@@ -123,7 +153,7 @@ export default async function handler(
         const isVercelCron = req.headers['x-vercel-cron'] === '1'
             || req.headers.authorization === `Bearer ${process.env.CRON_SECRET}`;
 
-        // ── GET: return cached data from Neon DB ──
+        // ── GET: return cached data ──
         if (req.method === 'GET' && !isVercelCron) {
             try {
                 await initScreenerTable();
@@ -136,105 +166,163 @@ export default async function handler(
                 });
             } catch (dbErr: any) {
                 console.error('[Screener] DB read failed:', dbErr.message);
-                return res.status(200).json({
-                    stocks: [],
-                    totalStocks: 0,
-                    lastUpdated: null,
-                    error: `Database read failed: ${dbErr.message}`,
-                });
+                return res.status(200).json({ stocks: [], totalStocks: 0, lastUpdated: null });
             }
         }
 
         // ── POST / Cron: run scan ──
         if (req.method === 'POST' || isVercelCron) {
-            console.log('[Screener] Triggering scan (direct HTTP, no crumb)...');
+            console.log('[Screener] Starting scan...');
             const startTime = Date.now();
-
             await initScreenerTable();
 
             const allTickers = TICKER_LIST;
-            if (allTickers.length === 0) {
-                return res.status(500).json({
-                    error: 'No tickers loaded from CSV',
-                    details: 'vanguard.csv could not be read or is empty',
-                });
+            if (!allTickers.length) {
+                return res.status(500).json({ error: 'No tickers loaded from CSV' });
             }
 
-            console.log(`[Screener] ${allTickers.length} tickers to scan`);
+            console.log(`[Screener] ${allTickers.length} tickers`);
+
+            // Establish Yahoo session (cookie + crumb) ONCE
+            const session = await getYahooSession();
+            const hasSession = !!session;
+            console.log(`[Screener] Session: ${hasSession ? 'established' : 'FAILED (will use chart fallback only)'}`);
 
             let totalProcessed = 0;
             let totalFailed = 0;
-            let rateLimited = 0;
+            const quoteMap: Record<string, any> = {};
 
-            // Process tickers in parallel batches
-            const CONCURRENCY = 10;
-
-            for (let i = 0; i < allTickers.length; i += CONCURRENCY) {
-                const batch = allTickers.slice(i, i + CONCURRENCY);
-
-                // Fetch chart + fundamentals in parallel for each ticker
-                const results = await Promise.allSettled(
-                    batch.map(async (ticker) => {
-                        const chart = await fetchChart(ticker);
-                        if (!chart) return null;
-
-                        const fund = await fetchFundamentals(ticker);
-
-                        return { ticker, chart, fund };
-                    })
-                );
-
-                for (const r of results) {
-                    if (r.status !== 'fulfilled' || !r.value) {
-                        totalFailed++;
-                        continue;
-                    }
-
-                    const { ticker, chart, fund } = r.value;
-
+            // ── Phase 1: Get quotes ──
+            if (hasSession) {
+                // Use v7 batch quote (50 at a time) — includes mcap, PE, divYield
+                const BATCH = 50;
+                for (let i = 0; i < allTickers.length; i += BATCH) {
+                    const batch = allTickers.slice(i, i + BATCH);
                     try {
-                        const totalRevenue = fund?.totalRevenue ?? null;
-                        const employees = fund?.fullTimeEmployees ?? null;
+                        const quotes = await batchQuoteV7(batch, session!);
+                        for (const q of quotes) {
+                            if (q?.symbol) quoteMap[q.symbol] = q;
+                        }
+                    } catch (err: any) {
+                        if (err.message === 'rate-limited') {
+                            console.warn(`[Screener] v7 rate limited at batch ${i}, waiting 10s...`);
+                            await sleep(10000);
+                            // Retry once
+                            try {
+                                const quotes = await batchQuoteV7(batch, session!);
+                                for (const q of quotes) {
+                                    if (q?.symbol) quoteMap[q.symbol] = q;
+                                }
+                            } catch {
+                                console.warn(`[Screener] v7 retry also failed at batch ${i}`);
+                            }
+                        } else {
+                            console.warn(`[Screener] v7 batch ${i} error: ${err.message}`);
+                        }
+                    }
+                    if (i + BATCH < allTickers.length) await sleep(300);
+                }
+                console.log(`[Screener] Phase 1 (v7): ${Object.keys(quoteMap).length} quotes`);
+            }
 
-                        await upsertScreenerRow({
-                            ticker,
-                            price: chart.price,
-                            market_cap: fund?.market_cap ?? null,
-                            pe_ratio: fund?.pe_ratio ?? null,
-                            roe_pct: fund?.roe != null ? fund.roe * 100 : null,
-                            debt_to_equity: fund?.debtToEquity ?? null,
-                            gross_margin_pct: fund?.grossMargins != null ? fund.grossMargins * 100 : null,
-                            dividend_yield_pct: fund?.dividendYield != null ? fund.dividendYield * 100 : null,
-                            roa_pct: fund?.roa != null ? fund.roa * 100 : null,
-                            total_revenue: totalRevenue,
-                            revenue_per_employee: totalRevenue && employees ? totalRevenue / employees : null,
-                            sector: fund?.sector ?? null,
-                            industry: fund?.industry ?? null,
-                            company_name: fund?.longName || chart.name || ticker,
-                            fifty_two_week_high: chart.fiftyTwoWeekHigh,
-                            fifty_two_week_low: chart.fiftyTwoWeekLow,
-                            beta: fund?.beta ?? null,
-                        });
-                        totalProcessed++;
-                    } catch (dbErr: any) {
-                        console.error(`[Screener] DB upsert ${ticker}: ${dbErr.message}`);
-                        totalFailed++;
+            // Fallback: use v8 chart for any tickers missing from v7
+            const missingTickers = allTickers.filter(t => !quoteMap[t]);
+            if (missingTickers.length > 0) {
+                console.log(`[Screener] Phase 1b: chart fallback for ${missingTickers.length} tickers`);
+                const CHART_CONCURRENCY = 15;
+                for (let i = 0; i < missingTickers.length; i += CHART_CONCURRENCY) {
+                    const batch = missingTickers.slice(i, i + CHART_CONCURRENCY);
+                    const results = await Promise.allSettled(batch.map(t => chartQuote(t)));
+                    for (const r of results) {
+                        if (r.status === 'fulfilled' && r.value) {
+                            quoteMap[r.value.symbol] = r.value;
+                        }
+                    }
+                    if (i + CHART_CONCURRENCY < missingTickers.length) await sleep(100);
+                }
+                console.log(`[Screener] Phase 1 total: ${Object.keys(quoteMap).length} quotes`);
+            }
+
+            if (Object.keys(quoteMap).length === 0) {
+                return res.status(500).json({
+                    error: 'No quotes obtained from Yahoo Finance',
+                    details: 'Both v7 batch and v8 chart endpoints failed',
+                });
+            }
+
+            // ── Phase 2: Get fundamentals (only if session works) ──
+            const tickers = Object.keys(quoteMap);
+            const fundMap: Record<string, any> = {};
+
+            if (hasSession) {
+                const FUND_CONCURRENCY = 5;
+                for (let i = 0; i < tickers.length; i += FUND_CONCURRENCY) {
+                    const batch = tickers.slice(i, i + FUND_CONCURRENCY);
+                    const results = await Promise.allSettled(
+                        batch.map(t => quoteSummary(t, session!))
+                    );
+                    for (let j = 0; j < batch.length; j++) {
+                        const r = results[j];
+                        if (r.status === 'fulfilled' && r.value) {
+                            fundMap[batch[j]] = r.value;
+                        }
+                    }
+                    if (i + FUND_CONCURRENCY < tickers.length) await sleep(300);
+
+                    const done = Math.min(i + FUND_CONCURRENCY, tickers.length);
+                    if (done % 100 === 0 || done >= tickers.length) {
+                        console.log(`[Screener] Fundamentals: ${done}/${tickers.length} (${Object.keys(fundMap).length} ok)`);
                     }
                 }
+            }
+            console.log(`[Screener] Phase 2: ${Object.keys(fundMap).length} fundamentals`);
 
-                // Rate limit protection
-                if (i + CONCURRENCY < allTickers.length) {
-                    await sleep(200);
-                }
+            // ── Phase 3: Upsert to DB ──
+            for (const ticker of tickers) {
+                const q = quoteMap[ticker];
+                const f = fundMap[ticker] || {};
+                const fin = f.financialData || {};
+                const det = f.summaryDetail || {};
+                const prof = f.assetProfile || {};
+                const pr = f.price || {};
+                const ks = f.defaultKeyStatistics || {};
 
-                const done = Math.min(i + CONCURRENCY, allTickers.length);
-                if (done % 100 === 0 || done >= allTickers.length) {
-                    console.log(`[Screener] Progress: ${done}/${allTickers.length} (${totalProcessed} ok, ${totalFailed} fail)`);
+                const totalRevenue = fin.totalRevenue?.raw ?? null;
+                const employees = prof.fullTimeEmployees ?? null;
+
+                try {
+                    await upsertScreenerRow({
+                        ticker,
+                        price: q.regularMarketPrice ?? null,
+                        market_cap: q.marketCap ?? pr.marketCap?.raw ?? null,
+                        pe_ratio: q.trailingPE ?? det.trailingPE?.raw ?? ks.trailingPE?.raw ?? null,
+                        roe_pct: fin.returnOnEquity?.raw != null ? fin.returnOnEquity.raw * 100 : null,
+                        debt_to_equity: fin.debtToEquity?.raw ?? null,
+                        gross_margin_pct: fin.grossMargins?.raw != null ? fin.grossMargins.raw * 100 : null,
+                        dividend_yield_pct: det.dividendYield?.raw != null
+                            ? det.dividendYield.raw * 100
+                            : q.dividendYield != null
+                                ? q.dividendYield * 100
+                                : null,
+                        roa_pct: fin.returnOnAssets?.raw != null ? fin.returnOnAssets.raw * 100 : null,
+                        total_revenue: totalRevenue,
+                        revenue_per_employee: totalRevenue && employees ? totalRevenue / employees : null,
+                        sector: prof.sector || null,
+                        industry: prof.industry || null,
+                        company_name: q.longName || q.shortName || pr.longName || ticker,
+                        fifty_two_week_high: q.fiftyTwoWeekHigh ?? null,
+                        fifty_two_week_low: q.fiftyTwoWeekLow ?? null,
+                        beta: det.beta?.raw ?? null,
+                    });
+                    totalProcessed++;
+                } catch (dbErr: any) {
+                    console.error(`[Screener] DB error ${ticker}: ${dbErr.message}`);
+                    totalFailed++;
                 }
             }
 
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`[Screener] ✅ Done: ${totalProcessed} ok, ${totalFailed} failed in ${duration}s`);
+            console.log(`[Screener] ✅ ${totalProcessed} ok, ${totalFailed} fail in ${duration}s`);
 
             return res.status(200).json({
                 success: totalProcessed > 0,
@@ -249,17 +337,11 @@ export default async function handler(
         return res.status(405).json({ error: 'Method not allowed' });
     } catch (error: any) {
         console.error('Screener API error:', error);
-        return res.status(500).json({
-            error: 'Screener failed',
-            details: error.message,
-        });
+        return res.status(500).json({ error: 'Screener failed', details: error.message });
     }
 }
 
 export const config = {
-    api: {
-        responseLimit: false,
-        bodyParser: { sizeLimit: '1mb' },
-    },
+    api: { responseLimit: false, bodyParser: { sizeLimit: '1mb' } },
     maxDuration: 300,
 };
