@@ -524,7 +524,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                         <table className="w-full min-w-[900px]">
                             <thead>
                                 <tr className="border-b border-gray-700/50 bg-gray-900/30">
-                                    <SortHeader label="Ticker" colKey="ticker" className="sticky left-0 bg-gray-900/90 backdrop-blur-sm z-10" />
+                                    <SortHeader label="Ticker" colKey="ticker" className="sticky left-0 bg-gray-900/90 backdrop-blur-sm z-10 text-center pl-4" />
                                     <SortHeader label="Price" colKey="price" />
                                     <SortHeader label="Mkt Cap" colKey="market_cap" />
                                     <SortHeader label="P/E" colKey="pe_ratio" />
@@ -545,10 +545,10 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                                         className={`border-b border-gray-800/30 hover:bg-gray-700/20 transition-colors ${idx % 2 === 0 ? 'bg-gray-800/10' : ''
                                             }`}
                                     >
-                                        <td className="py-2.5 px-3 sticky left-0 bg-gray-900/80 backdrop-blur-sm z-10">
+                                        <td className="py-2.5 px-3 sticky left-0 bg-gray-900/80 backdrop-blur-sm z-10 text-center">
                                             <button
                                                 onClick={() => onTickerClick?.(stock.ticker)}
-                                                className="group flex flex-col"
+                                                className="group flex flex-col items-center justify-center w-full"
                                             >
                                                 <span className="font-bold text-aquamarine-400 group-hover:text-aquamarine-300 transition-colors text-sm">
                                                     {stock.ticker}

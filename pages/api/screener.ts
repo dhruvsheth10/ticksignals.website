@@ -176,6 +176,29 @@ export default async function handler(
             const startTime = Date.now();
             await initScreenerTable();
 
+            // ── Rate Limiting / Cooldown ──
+            // Prevent spam-clicking: if data is < 15 mins old, don't re-scan unless forced or cron
+            const meta = await getScanMetadata();
+            if (!isVercelCron && req.query.force !== 'true' && meta.lastUpdated) {
+                const last = new Date(meta.lastUpdated);
+                const now = new Date();
+                const diffMs = now.getTime() - last.getTime();
+                const COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+
+                if (diffMs < COOLDOWN_MS) {
+                    const diffMins = Math.round(diffMs / 60000);
+                    console.log(`[Screener] Skipping scan (last run ${diffMins}m ago)`);
+                    return res.status(200).json({
+                        success: true,
+                        processed: 0,
+                        failed: 0,
+                        total: meta.count,
+                        durationSeconds: "0.0",
+                        message: `Data is fresh (${diffMins}m ago). Skipping scan.`
+                    });
+                }
+            }
+
             const allTickers = TICKER_LIST;
             if (!allTickers.length) {
                 return res.status(500).json({ error: 'No tickers loaded from CSV' });
