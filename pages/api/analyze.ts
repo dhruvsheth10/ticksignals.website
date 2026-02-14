@@ -1,5 +1,4 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { batchQuote, getQuoteSummary } from '../../lib/yahoo';
 
 export default async function handler(
   req: NextApiRequest,
@@ -18,59 +17,39 @@ export default async function handler(
 
     const upperTicker = ticker.toUpperCase();
 
-    // Fetch quote + fundamentals in parallel using our raw Yahoo client
-    const [quotes, fundamentals] = await Promise.all([
-      batchQuote([upperTicker]),
-      getQuoteSummary(upperTicker),
-    ]);
-
-    const quote = quotes[0];
-    if (!quote) {
-      return res.status(404).json({ error: `Ticker ${upperTicker} not found` });
-    }
-
-    // Fetch historical data for chart using yahoo-finance2 (chart endpoint works)
-    // We'll use raw fetch for this too
+    // Fetch max historical data (unauthenticated chart endpoint)
     const endDate = Math.floor(Date.now() / 1000);
-    const startDate = endDate - (10 * 365.25 * 24 * 60 * 60); // 10 years
+    const startDate = endDate - (20 * 365.25 * 24 * 60 * 60); // 20 years
     const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${upperTicker}?period1=${Math.floor(startDate)}&period2=${endDate}&interval=1d`;
 
     const chartRes = await fetch(chartUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
     });
+
+    if (!chartRes.ok) {
+      return res.status(404).json({ error: `Ticker ${upperTicker} not found` });
+    }
+
     const chartData = await chartRes.json();
-
     const chartResult = chartData.chart?.result?.[0];
-    const timestamps = chartResult?.timestamp || [];
-    const closes = chartResult?.indicators?.quote?.[0]?.close || [];
 
-    // Convert timestamps to dates
-    const chartDates = timestamps.map((ts: number) => {
-      const d = new Date(ts * 1000);
-      return d.toISOString().split('T')[0];
-    });
+    if (!chartResult) {
+      return res.status(404).json({ error: `No data found for ticker ${upperTicker}` });
+    }
 
-    // SMA calculations
-    const calculateSMA = (prices: number[], period: number): number[] => {
-      const sma: number[] = [];
-      for (let i = 0; i < prices.length; i++) {
-        if (i < period - 1) {
-          sma.push(NaN);
-        } else {
-          let sum = 0, count = 0;
-          for (let j = i - period + 1; j <= i; j++) {
-            if (prices[j] != null) { sum += prices[j]; count++; }
-          }
-          sma.push(count > 0 ? sum / count : NaN);
-        }
-      }
-      return sma;
-    };
+    const meta = chartResult.meta;
+    const timestamps: number[] = chartResult.timestamp || [];
+    const ohlcv = chartResult.indicators?.quote?.[0] || {};
+    const closes: (number | null)[] = ohlcv.close || [];
+    const opens: (number | null)[] = ohlcv.open || [];
+    const highs: (number | null)[] = ohlcv.high || [];
+    const lows: (number | null)[] = ohlcv.low || [];
+    const volumes: (number | null)[] = ohlcv.volume || [];
 
-    const sma50 = calculateSMA(closes, 50);
-    const sma200 = calculateSMA(closes, 200);
+    // Convert timestamps to ISO date strings
+    const dates = timestamps.map((ts: number) => new Date(ts * 1000).toISOString().split('T')[0]);
 
-    // Format market cap
+    // Format helpers
     const formatMarketCap = (value: number) => {
       if (value >= 1e12) return `${(value / 1e12).toFixed(2)}T`;
       if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
@@ -78,81 +57,76 @@ export default async function handler(
       return `${value.toLocaleString()}`;
     };
 
-    const totalRevenue = fundamentals?.totalRevenue;
-    const employees = fundamentals?.fullTimeEmployees;
+    // Fetch fundamentals (may fail silently – that's fine)
+    let fundamentalsData: any = null;
+    try {
+      const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${upperTicker}?modules=financialData,summaryDetail,assetProfile,defaultKeyStatistics`;
+      const summaryRes = await fetch(summaryUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
+      });
+      if (summaryRes.ok) {
+        const summaryJson = await summaryRes.json();
+        const result = summaryJson.quoteSummary?.result?.[0];
+        if (result) {
+          const fin = result.financialData || {};
+          const det = result.summaryDetail || {};
+          const prof = result.assetProfile || {};
+          const stats = result.defaultKeyStatistics || {};
+          fundamentalsData = {
+            returnOnEquity: fin.returnOnEquity?.raw ?? null,
+            returnOnAssets: fin.returnOnAssets?.raw ?? null,
+            debtToEquity: fin.debtToEquity?.raw ?? null,
+            grossMargins: fin.grossMargins?.raw ?? null,
+            totalRevenue: fin.totalRevenue?.raw ?? null,
+            fullTimeEmployees: prof.fullTimeEmployees ?? null,
+            sector: prof.sector || null,
+            industry: prof.industry || null,
+            dividendYield: det.dividendYield?.raw ?? null,
+            beta: det.beta?.raw ?? null,
+            trailingPE: det.trailingPE?.raw ?? stats.trailingPE?.raw ?? null,
+          };
+        }
+      }
+    } catch (_) {
+      // Fundamentals are optional — silently ignore
+    }
+
+    const totalRevenue = fundamentalsData?.totalRevenue;
+    const employees = fundamentalsData?.fullTimeEmployees;
 
     const responseData = {
       ticker: upperTicker,
-      companyName: quote.shortName || quote.longName || upperTicker,
-      price: `${quote.regularMarketPrice?.toFixed(2) || 'N/A'}`,
-      marketCap: quote.marketCap ? formatMarketCap(quote.marketCap) : 'N/A',
-      volume: (quote as any).regularMarketVolume ? (quote as any).regularMarketVolume.toLocaleString() : 'N/A',
-      peRatio: quote.trailingPE ? quote.trailingPE.toFixed(2) : 'N/A',
+      companyName: meta.shortName || meta.longName || upperTicker,
+      price: meta.regularMarketPrice?.toFixed(2) || 'N/A',
+      previousClose: meta.chartPreviousClose ?? null,
+      marketCap: meta.marketCap ? formatMarketCap(meta.marketCap) : 'N/A',
+      volume: meta.regularMarketVolume ? meta.regularMarketVolume.toLocaleString() : 'N/A',
+      peRatio: fundamentalsData?.trailingPE ? fundamentalsData.trailingPE.toFixed(2) : 'N/A',
       fundamentals: {
-        roe: fundamentals?.returnOnEquity != null ? (fundamentals.returnOnEquity * 100).toFixed(1) + '%' : 'N/A',
-        roa: fundamentals?.returnOnAssets != null ? (fundamentals.returnOnAssets * 100).toFixed(1) + '%' : 'N/A',
-        debtToEquity: fundamentals?.debtToEquity != null ? fundamentals.debtToEquity.toFixed(1) : 'N/A',
-        grossMargin: fundamentals?.grossMargins != null ? (fundamentals.grossMargins * 100).toFixed(1) + '%' : 'N/A',
-        dividendYield: fundamentals?.dividendYield != null ? (fundamentals.dividendYield * 100).toFixed(2) + '%' : 'N/A',
-        beta: fundamentals?.beta != null ? fundamentals.beta.toFixed(2) : 'N/A',
+        roe: fundamentalsData?.returnOnEquity != null ? (fundamentalsData.returnOnEquity * 100).toFixed(1) + '%' : 'N/A',
+        roa: fundamentalsData?.returnOnAssets != null ? (fundamentalsData.returnOnAssets * 100).toFixed(1) + '%' : 'N/A',
+        debtToEquity: fundamentalsData?.debtToEquity != null ? fundamentalsData.debtToEquity.toFixed(1) : 'N/A',
+        grossMargin: fundamentalsData?.grossMargins != null ? (fundamentalsData.grossMargins * 100).toFixed(1) + '%' : 'N/A',
+        dividendYield: fundamentalsData?.dividendYield != null ? (fundamentalsData.dividendYield * 100).toFixed(2) + '%' : 'N/A',
+        beta: fundamentalsData?.beta != null ? fundamentalsData.beta.toFixed(2) : 'N/A',
         totalRevenue: totalRevenue ? formatMarketCap(totalRevenue) : 'N/A',
         revenuePerEmployee: (totalRevenue && employees && employees > 0)
           ? `$${Math.round(totalRevenue / employees).toLocaleString()}`
           : 'N/A',
-        fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh ? `$${quote.fiftyTwoWeekHigh.toFixed(2)}` : 'N/A',
-        fiftyTwoWeekLow: quote.fiftyTwoWeekLow ? `$${quote.fiftyTwoWeekLow.toFixed(2)}` : 'N/A',
-        sector: fundamentals?.sector || 'N/A',
-        industry: fundamentals?.industry || 'N/A',
+        fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ? `$${meta.fiftyTwoWeekHigh.toFixed(2)}` : 'N/A',
+        fiftyTwoWeekLow: meta.fiftyTwoWeekLow ? `$${meta.fiftyTwoWeekLow.toFixed(2)}` : 'N/A',
+        sector: fundamentalsData?.sector || 'N/A',
+        industry: fundamentalsData?.industry || 'N/A',
         employees: employees ? employees.toLocaleString() : 'N/A',
       },
+      // Raw chart data – frontend slices by range
       chart: {
-        data: [
-          {
-            x: chartDates,
-            y: closes,
-            type: 'scatter',
-            mode: 'lines',
-            name: `${upperTicker} Price`,
-            line: { color: '#14b8a6', width: 2 },
-            hovertemplate: '<b>%{fullData.name}</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
-          },
-          {
-            x: chartDates,
-            y: sma50,
-            type: 'scatter',
-            mode: 'lines',
-            name: 'SMA 50',
-            line: { color: '#3b82f6', width: 1.5 },
-            hovertemplate: '<b>SMA 50</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
-          },
-          {
-            x: chartDates,
-            y: sma200,
-            type: 'scatter',
-            mode: 'lines',
-            name: 'SMA 200',
-            line: { color: '#eab308', width: 1.5 },
-            hovertemplate: '<b>SMA 200</b><br>Date: %{x}<br>Price: $%{y:.2f}<extra></extra>',
-          },
-        ],
-        layout: {
-          title: `${quote.shortName || upperTicker} - 10 Year Chart`,
-          xaxis: {
-            title: 'Date',
-            type: 'date',
-            range: chartDates.length > 0 ? [
-              chartDates[Math.max(0, chartDates.length - 180)],
-              chartDates[chartDates.length - 1],
-            ] : undefined,
-            autorange: false,
-          },
-          yaxis: {
-            title: 'Price (USD)',
-            autorange: true,
-            fixedrange: false,
-          },
-          autosize: true,
-        },
+        dates,
+        closes,
+        opens,
+        highs,
+        lows,
+        volumes,
       },
     };
 
