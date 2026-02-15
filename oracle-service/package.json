@@ -1,0 +1,27 @@
+{
+  "name": "trading-analysis-oracle",
+  "version": "1.0.0",
+  "description": "Oracle Cloud service for analyzing all Vanguard stocks with trading signals",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "analyze": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "yahoo-finance2": "^3.10.1",
+    "pg": "^8.16.3",
+    "dotenv": "^17.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@types/pg": "^8.15.6",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
