@@ -17,6 +17,14 @@
 .DS_Store
 *.pem
 
+# SSH keys
+*SSH*.key
+*SSH*.pub
+SSH*.key
+SSH*.pub
+*.key
+*.pub
+
 # debug
 npm-debug.log*
 yarn-debug.log*
