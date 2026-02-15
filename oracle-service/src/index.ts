@@ -29,11 +29,12 @@ function loadTickers(): string[] {
     
     if (!csvPath) {
         csvPath = possiblePaths[0]; // Use first as default for error message
+    }
     
     if (!csvPath || !fs.existsSync(csvPath)) {
         console.error(`[Error] vanguard.csv not found. Tried:`);
         possiblePaths.forEach(p => console.error(`  - ${p}`));
-        process.exit(1);
+        throw new Error('vanguard.csv not found');
     }
     
     console.log(`[Info] Using vanguard.csv from: ${csvPath}`);
