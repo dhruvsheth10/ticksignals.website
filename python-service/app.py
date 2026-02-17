@@ -121,7 +121,7 @@ def forecast_scan():
                     ticker_df = pd.read_csv('vanguard.csv')
                     tickers = ticker_df.iloc[:, 0].tolist()[:100]
                 except:
-                    yield stream_log("❌ No tickers found")
+                    yield stream_log("No tickers found")
                     yield f"data: {json.dumps({'complete': True, 'error': True})}\n\n"
                     return
             

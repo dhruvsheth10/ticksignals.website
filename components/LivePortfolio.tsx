@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText } from 'lucide-react';
 
 interface PortfolioData {
     status: {
@@ -35,6 +35,14 @@ interface PortfolioData {
 const LivePortfolio = () => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
+    const [showAdminLogs, setShowAdminLogs] = useState(false);
+    const [adminPassword, setAdminPassword] = useState('');
+    const [adminLoading, setAdminLoading] = useState(false);
+    const [adminError, setAdminError] = useState<string | null>(null);
+    const [adminLogs, setAdminLogs] = useState<{
+        trades: any[];
+        analysis: any[];
+    } | null>(null);
 
     useEffect(() => {
         fetchPortfolio();
@@ -208,13 +216,21 @@ const LivePortfolio = () => {
                     </div>
                 </div>
 
-                {/* Right Column: Transactions (1/3 width) */}
+                {/* Right Column: Transactions + Admin Logs (1/3 width) */}
                 <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden flex flex-col h-full max-h-[800px]">
-                    <div className="p-4 border-b border-gray-700/50 bg-gray-800/80 sticky top-0 z-10">
+                    <div className="p-4 border-b border-gray-700/50 bg-gray-800/80 sticky top-0 z-10 flex items-center justify-between">
                         <h3 className="text-lg font-bold text-white flex items-center gap-2">
                             <HistoryIcon />
                             Trade History
                         </h3>
+                        <button
+                            onClick={() => setShowAdminLogs(true)}
+                            className="inline-flex items-center gap-1 rounded-md border border-gray-600 px-2 py-1 text-xs text-gray-200 hover:bg-gray-700 transition-colors"
+                            title="Admin logs (password required)"
+                        >
+                            <FileText size={14} />
+                            Logs
+                        </button>
                     </div>
                     <div className="overflow-y-auto flex-1 p-0 custom-scrollbar">
                         {data.transactions.length === 0 ? (
@@ -245,6 +261,160 @@ const LivePortfolio = () => {
                                             <div className="text-xs text-gray-500">
                                                 ${tx.total_amount.toLocaleString()}
                                             </div>
+
+            {/* Admin Logs Modal */}
+            {showAdminLogs && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+                    <div className="w-full max-w-4xl rounded-xl bg-gray-900 border border-gray-700 shadow-2xl max-h-[90vh] flex flex-col">
+                        <div className="flex items-center justify-between border-b border-gray-700 px-4 py-3">
+                            <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                                <FileText size={16} className="text-aquamarine-400" />
+                                Admin Trade & Signal Logs
+                            </h2>
+                            <button
+                                onClick={() => {
+                                    setShowAdminLogs(false);
+                                    setAdminPassword('');
+                                    setAdminError(null);
+                                }}
+                                className="text-gray-400 hover:text-white text-sm"
+                            >
+                                Close
+                            </button>
+                        </div>
+
+                        {/* Password gate */}
+                        {!adminLogs && (
+                            <div className="p-4 border-b border-gray-800">
+                                <p className="text-xs text-gray-400 mb-2">
+                                    Enter admin password to view detailed logs. Password is never stored in the browser.
+                                </p>
+                                <form
+                                    className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center"
+                                    onSubmit={async (e) => {
+                                        e.preventDefault();
+                                        setAdminLoading(true);
+                                        setAdminError(null);
+                                        try {
+                                            const res = await fetch('/api/admin/trade-logs', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ password: adminPassword, limit: 100 }),
+                                            });
+                                            const json = await res.json();
+                                            if (!res.ok || !json.ok) {
+                                                throw new Error(json.error || 'Failed to load logs');
+                                            }
+                                            setAdminLogs({
+                                                trades: json.trades || [],
+                                                analysis: json.analysis || [],
+                                            });
+                                        } catch (err: any) {
+                                            setAdminError(err.message || 'Failed to load logs');
+                                        } finally {
+                                            setAdminLoading(false);
+                                            setAdminPassword('');
+                                        }
+                                    }}
+                                >
+                                    <input
+                                        type="password"
+                                        className="flex-1 rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-aquamarine-400"
+                                        placeholder="Admin password"
+                                        value={adminPassword}
+                                        onChange={(e) => setAdminPassword(e.target.value)}
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={adminLoading || !adminPassword}
+                                        className="rounded-md bg-aquamarine-500 px-3 py-1.5 text-xs font-semibold text-black disabled:opacity-60"
+                                    >
+                                        {adminLoading ? 'Checking…' : 'View logs'}
+                                    </button>
+                                </form>
+                                {adminError && (
+                                    <p className="mt-2 text-xs text-red-400">
+                                        {adminError}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Logs content */}
+                        {adminLogs && (
+                            <div className="flex-1 overflow-y-auto p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs text-gray-200">
+                                <div>
+                                    <h3 className="mb-2 font-semibold text-white">Recent Trades</h3>
+                                    {adminLogs.trades.length === 0 ? (
+                                        <p className="text-gray-500">No trades recorded yet.</p>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {adminLogs.trades.map((tx, idx) => (
+                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="font-bold">{tx.ticker}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                                                            {tx.type}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex justify-between text-gray-400">
+                                                        <span>{tx.shares} @ ${tx.price.toFixed(2)}</span>
+                                                        <span>${tx.total_amount.toLocaleString()}</span>
+                                                    </div>
+                                                    <div className="mt-1 text-[10px] text-gray-500">
+                                                        {new Date(tx.date).toLocaleString()}
+                                                        {tx.notes && ` · ${tx.notes}`}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <h3 className="mb-2 font-semibold text-white">Recent Signals / Reasons</h3>
+                                    {adminLogs.analysis.length === 0 ? (
+                                        <p className="text-gray-500">No analysis logs yet.</p>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {adminLogs.analysis.map((row, idx) => (
+                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="font-bold">{row.ticker}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                                            row.action === 'BUY'
+                                                                ? 'bg-green-500/20 text-green-400'
+                                                                : row.action === 'SELL'
+                                                                ? 'bg-red-500/20 text-red-400'
+                                                                : 'bg-gray-500/20 text-gray-300'
+                                                        }`}>
+                                                            {row.action} {row.confidence != null ? `(${row.confidence}%)` : ''}
+                                                        </span>
+                                                    </div>
+                                                    <div className="text-[11px] text-gray-400 mb-1">
+                                                        {row.reason}
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
+                                                        {row.rsi != null && <span>RSI: {row.rsi.toFixed(1)}</span>}
+                                                        {row.macd_histogram != null && <span>MACD hist: {row.macd_histogram.toFixed(3)}</span>}
+                                                        {row.volume_ratio != null && <span>Vol×: {row.volume_ratio.toFixed(2)}</span>}
+                                                        {row.price_change_pct != null && <span>Δ20d: {row.price_change_pct.toFixed(1)}%</span>}
+                                                        {row.sma50 != null && row.sma200 != null && (
+                                                            <span>SMA50/SMA200: {row.sma50.toFixed(2)}/{row.sma200.toFixed(2)}</span>
+                                                        )}
+                                                    </div>
+                                                    <div className="mt-1 text-[10px] text-gray-500">
+                                                        {row.analyzed_at && new Date(row.analyzed_at).toLocaleString()}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
                                         </div>
                                     </div>
                                 ))}

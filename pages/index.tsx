@@ -5,6 +5,7 @@ import Layout from '../components/Layout';
 import TickerAnalyzer from '../components/TickerAnalyzer';
 import StockScreener from '../components/StockScreener';
 import LivePortfolio from '../components/LivePortfolio';
+import CloudStatus from '../components/CloudStatus';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('screener');
@@ -32,14 +33,17 @@ export default function Home() {
       </Head>
 
       <Layout>
-        {/* Hero Section */}
+        {/* Hero Section + Cloud Status */}
         <div className="relative overflow-hidden">
           <div className="absolute inset-0 bg-aqua-gradient opacity-10"></div>
           <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-16">
-            <div className="text-center animate-fade-in">
-              <h1 className="text-5xl sm:text-6xl md:text-7xl font-bold bg-gradient-to-r from-aquamarine-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent mb-4 pb-2">
+            <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:justify-between animate-fade-in">
+              <h1 className="text-5xl sm:text-6xl md:text-7xl font-bold bg-gradient-to-r from-aquamarine-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent pb-2">
                 TickSignals
               </h1>
+              <div className="mt-2 sm:mt-0">
+                <CloudStatus />
+              </div>
             </div>
           </div>
         </div>
