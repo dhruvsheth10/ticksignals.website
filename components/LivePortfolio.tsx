@@ -415,7 +415,7 @@ const LivePortfolio = () => {
                         )}
                     </div>
                 </div>
-                                        </div>
+            )                        } </div>
                                     </div>
                                 ))}
                             </div>
