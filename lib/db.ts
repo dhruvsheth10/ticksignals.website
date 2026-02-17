@@ -157,3 +157,78 @@ export async function getScanMetadata(): Promise<{ count: number; lastUpdated: s
         lastUpdated: result.rows[0]?.last_updated || null,
     };
 }
+
+/**
+ * Save analysis result to database (Shared with Oracle Service)
+ */
+export async function saveAnalysisResult(data: {
+    ticker: string;
+    action: 'BUY' | 'SELL' | 'HOLD';
+    confidence: number;
+    reason: string;
+    sentimentScore?: number;
+    sentimentConfidence?: number;
+    rsi?: number;
+    macdHistogram?: number;
+    volumeRatio?: number;
+    priceChangePct?: number;
+    sma50?: number;
+    sma200?: number;
+}): Promise<void> {
+    const db = getPool();
+
+    // Ensure table exists (lazy init for Vercel env)
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS trading_analysis_results (
+            id SERIAL PRIMARY KEY,
+            ticker VARCHAR(10) NOT NULL,
+            action VARCHAR(10) NOT NULL CHECK (action IN ('BUY', 'SELL', 'HOLD')),
+            confidence INTEGER NOT NULL,
+            reason TEXT,
+            sentiment_score REAL,
+            sentiment_confidence REAL,
+            rsi REAL,
+            macd_histogram REAL,
+            volume_ratio REAL,
+            price_change_pct REAL,
+            sma50 REAL,
+            sma200 REAL,
+            analyzed_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(ticker, analyzed_at)
+        );
+    `);
+
+    await db.query(`
+        INSERT INTO trading_analysis_results (
+            ticker, action, confidence, reason,
+            sentiment_score, sentiment_confidence,
+            rsi, macd_histogram, volume_ratio, price_change_pct,
+            sma50, sma200, analyzed_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        ON CONFLICT (ticker, analyzed_at) DO UPDATE SET
+            action = EXCLUDED.action,
+            confidence = EXCLUDED.confidence,
+            reason = EXCLUDED.reason,
+            sentiment_score = EXCLUDED.sentiment_score,
+            sentiment_confidence = EXCLUDED.sentiment_confidence,
+            rsi = EXCLUDED.rsi,
+            macd_histogram = EXCLUDED.macd_histogram,
+            volume_ratio = EXCLUDED.volume_ratio,
+            price_change_pct = EXCLUDED.price_change_pct,
+            sma50 = EXCLUDED.sma50,
+            sma200 = EXCLUDED.sma200
+    `, [
+        data.ticker,
+        data.action,
+        data.confidence,
+        data.reason,
+        data.sentimentScore || null,
+        data.sentimentConfidence || null,
+        data.rsi || null,
+        data.macdHistogram || null,
+        data.volumeRatio || null,
+        data.priceChangePct || null,
+        data.sma50 || null,
+        data.sma200 || null
+    ]);
+}

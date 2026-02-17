@@ -1,5 +1,5 @@
 
-import { getPool } from './db';
+import { getPool, saveAnalysisResult } from './db';
 import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus } from './portfolio-db';
 import yahooFinance from 'yahoo-finance2';
 import { getSentimentScore } from './sentiment';
@@ -10,6 +10,14 @@ export interface TradeSignal {
     reason: string;
     confidence: number;
     sentimentBoost?: number; // Additional confidence from sentiment
+    indicators?: {
+        rsi: number;
+        macdHistogram: number;
+        volumeRatio: number;
+        priceChangePct: number;
+        sma50: number;
+        sma200: number;
+    };
 }
 
 interface TechnicalIndicators {
@@ -66,14 +74,14 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
                 // Enhanced Stop Loss / Take Profit (runs at MID and CLOSE)
                 if (type === 'MID' || type === 'CLOSE') {
                     const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
-                    
+
                     // Stop Loss: -7% (slightly tighter for faster exits)
                     if (returnPct < -7) {
                         await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Stop Loss Hit (${returnPct.toFixed(1)}%)`);
                         totalEquity -= price * holding.shares;
                         continue;
                     }
-                    
+
                     // Partial Profit Taking: Sell 50% at +15%, 25% more at +25%
                     if (returnPct >= 25 && holding.shares > 0) {
                         const sellShares = Math.floor(holding.shares * 0.25);
@@ -101,20 +109,38 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
     await updatePortfolioStatus(status.cash_balance, totalEquity);
 
     // 2. Enhanced Sell Logic (runs at OPEN, MID, and CLOSE for more opportunities)
-        const currentHoldings = await getHoldings();
-        for (const holding of currentHoldings) {
-            const signal = await analyzeTicker(holding.ticker);
+    const currentHoldings = await getHoldings();
+    for (const holding of currentHoldings) {
+        const signal = await analyzeTicker(holding.ticker);
+
+        // Save Analysis Result (so cloud status updates)
+        try {
+            await saveAnalysisResult({
+                ticker: holding.ticker,
+                action: signal.action,
+                confidence: signal.confidence,
+                reason: signal.reason,
+                sentimentScore: signal.sentimentBoost ? signal.sentimentBoost / 10 : undefined,
+                sentimentConfidence: signal.sentimentBoost ? Math.abs(signal.sentimentBoost) / 10 : undefined,
+                rsi: signal.indicators?.rsi,
+                macdHistogram: signal.indicators?.macdHistogram,
+                volumeRatio: signal.indicators?.volumeRatio,
+                priceChangePct: signal.indicators?.priceChangePct,
+                sma50: signal.indicators?.sma50,
+                sma200: signal.indicators?.sma200
+            });
+        } catch (e) { console.error(`Failed to save analysis for ${holding.ticker}`, e); }
         // Lower threshold: 65% (was 70%) for more frequent sells
         if (signal.action === 'SELL' && signal.confidence >= 65) {
-                try {
-                    const quote = await yahooFinance.quote(holding.ticker) as any;
-                    await executeTrade(holding.ticker, 'SELL', holding.shares, quote.regularMarketPrice, signal.reason);
-                    const freshStatus = await getPortfolioStatus();
+            try {
+                const quote = await yahooFinance.quote(holding.ticker) as any;
+                await executeTrade(holding.ticker, 'SELL', holding.shares, quote.regularMarketPrice, signal.reason);
+                const freshStatus = await getPortfolioStatus();
                 await updatePortfolioStatus(
                     freshStatus.cash_balance + (holding.shares * quote.regularMarketPrice),
                     totalEquity - (holding.shares * quote.regularMarketPrice)
                 );
-                } catch (e) { console.error(e); }
+            } catch (e) { console.error(e); }
         }
     }
 
@@ -137,7 +163,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
                 baseSize * (0.8 + confidenceMultiplier * 0.4), // 8-12% range
                 freshStatus.cash_balance * 0.8 // Don't use more than 80% of cash
             );
-            
+
             if (positionSize < 1000) continue;
 
             try {
@@ -185,6 +211,25 @@ async function getBuyCandidates(): Promise<TradeSignal[]> {
     // 2. Enhanced Technical Analysis + Sentiment on top candidates
     for (const row of result.rows) {
         const analysis = await analyzeTicker(row.ticker);
+
+        // Save Analysis Result (so cloud status updates)
+        try {
+            await saveAnalysisResult({
+                ticker: row.ticker,
+                action: analysis.action,
+                confidence: analysis.confidence,
+                reason: analysis.reason,
+                sentimentScore: analysis.sentimentBoost ? analysis.sentimentBoost / 10 : undefined,
+                sentimentConfidence: analysis.sentimentBoost ? Math.abs(analysis.sentimentBoost) / 10 : undefined,
+                rsi: analysis.indicators?.rsi,
+                macdHistogram: analysis.indicators?.macdHistogram,
+                volumeRatio: analysis.indicators?.volumeRatio,
+                priceChangePct: analysis.indicators?.priceChangePct,
+                sma50: analysis.indicators?.sma50,
+                sma200: analysis.indicators?.sma200
+            });
+        } catch (e) { console.error(`Failed to save analysis for ${row.ticker}`, e); }
+
         // Lower threshold: 68% (was 75%) for more buy opportunities
         if (analysis.action === 'BUY' && analysis.confidence >= 68) {
             signals.push(analysis);
@@ -252,8 +297,8 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
             }
 
             // 5. Bollinger Bands (buy near lower band in uptrend)
-            const bbPosition = (current.close - indicators.bollingerBands.lower) / 
-                              (indicators.bollingerBands.upper - indicators.bollingerBands.lower);
+            const bbPosition = (current.close - indicators.bollingerBands.lower) /
+                (indicators.bollingerBands.upper - indicators.bollingerBands.lower);
             if (bbPosition < 0.3 && isUptrend) {
                 buyConfidence += 15;
                 buySignals.push('Near BB lower band');
@@ -277,7 +322,15 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                     action: 'BUY',
                     reason: buySignals.join(', '),
                     confidence: Math.min(95, buyConfidence),
-                    sentimentBoost
+                    sentimentBoost,
+                    indicators: {
+                        rsi: indicators.rsi,
+                        macdHistogram: indicators.macd.histogram,
+                        volumeRatio: indicators.volumeRatio,
+                        priceChangePct: indicators.priceChange,
+                        sma50: indicators.sma50,
+                        sma200: indicators.sma200
+                    }
                 };
             }
         }
@@ -303,8 +356,8 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
             }
 
             // Death Cross (SMA50 crossing below SMA200)
-            if (indicators.sma50 < indicators.sma200 && 
-                quotes.length >= 51 && 
+            if (indicators.sma50 < indicators.sma200 &&
+                quotes.length >= 51 &&
                 quotes[quotes.length - 2].close) {
                 const prevSMA50 = quotes.slice(-51, -1).reduce((acc: number, q: any) => acc + (q.close || 0), 0) / 50;
                 const prevSMA200 = quotes.slice(-201, -1).reduce((acc: number, q: any) => acc + (q.close || 0), 0) / 200;
@@ -332,17 +385,33 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                     action: 'SELL',
                     reason: sellSignals.join(', '),
                     confidence: Math.min(95, sellConfidence),
-                    sentimentBoost
+                    sentimentBoost,
+                    indicators: {
+                        rsi: indicators.rsi,
+                        macdHistogram: indicators.macd.histogram,
+                        volumeRatio: indicators.volumeRatio,
+                        priceChangePct: indicators.priceChange,
+                        sma50: indicators.sma50,
+                        sma200: indicators.sma200
+                    }
                 };
             }
         }
 
         // Neutral/Hold
-        return { 
-            ticker, 
-            action: 'HOLD', 
+        return {
+            ticker,
+            action: 'HOLD',
             reason: `Neutral: RSI ${Math.round(indicators.rsi)}, Trend ${isUptrend ? 'Up' : 'Down'}`,
-            confidence: 50 
+            confidence: 50,
+            indicators: {
+                rsi: indicators.rsi,
+                macdHistogram: indicators.macd.histogram,
+                volumeRatio: indicators.volumeRatio,
+                priceChangePct: indicators.priceChange,
+                sma50: indicators.sma50,
+                sma200: indicators.sma200
+            }
         };
 
     } catch (e) {

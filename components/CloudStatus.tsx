@@ -29,20 +29,20 @@ export default function CloudStatus() {
     }, []);
 
     const indicatorColor = status?.ok ? 'bg-emerald-500' : 'bg-amber-500';
-    const textColor = status?.ok ? 'text-emerald-600' : 'text-amber-600';
+    const textColor = status?.ok ? 'text-emerald-400' : 'text-amber-400';
 
     return (
-        <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs shadow-sm">
+        <div className="inline-flex items-center gap-2 rounded-full border border-gray-700 bg-gray-800/80 backdrop-blur-sm px-3 py-1 text-xs shadow-sm">
             <span className={`h-2 w-2 rounded-full ${indicatorColor} animate-pulse`} />
             <span className={`font-medium ${textColor}`}>
                 {error
                     ? 'Cloud status: unknown'
                     : status?.ok
-                    ? 'Cloud trading: Active'
-                    : 'Cloud trading: Idle'}
+                        ? 'Cloud trading: Active'
+                        : 'Cloud trading: Idle'}
             </span>
             {status?.lastAnalysisMinutesAgo != null && (
-                <span className="text-slate-500">
+                <span className="text-gray-400">
                     · Last analysis {status.lastAnalysisMinutesAgo.toFixed(1)} min ago
                 </span>
             )}
