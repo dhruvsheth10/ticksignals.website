@@ -39,11 +39,11 @@ export default function CloudStatus() {
                     ? 'Cloud status: unknown'
                     : status?.ok
                         ? 'Cloud trading: Active'
-                        : 'Cloud trading: Idle'}
+                        : 'Cloud trading: Paused'}
             </span>
             {status?.lastAnalysisMinutesAgo != null && (
                 <span className="text-gray-400">
-                    · Last analysis {status.lastAnalysisMinutesAgo.toFixed(1)} min ago
+                    · Last analysis {status.lastAnalysisMinutesAgo.toFixed(0)} min ago
                 </span>
             )}
         </div>
