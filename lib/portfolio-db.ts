@@ -18,7 +18,6 @@ export interface PortfolioHolding {
     current_price: number;
     market_value: number;
     return_pct: number;
-    return_pct: number;
     last_updated: string;
     opened_at: string;
 }

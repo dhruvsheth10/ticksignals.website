@@ -52,17 +52,19 @@ export function isMarketOpen(): boolean {
 
 /**
  * Core Trading Engine (Enhanced)
- * 1. Sync Portfolio Prices
- * 2. Generate Signals with Sentiment
- * 3. Execute Trades (More Frequent)
+ * OPEN/MID/CLOSE: full cycle (sync, sell logic, buy scan).
+ * PORTFOLIO_CHECK: sync + stop loss + take profit + sell signals only (no new buys). Use every 15 min when holding.
+ * For each holding, sell logic uses full analyzeTicker() — 200d chart, RSI, MACD, Bollinger Bands, volume, sentiment — not just price.
  */
-export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
+export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLIO_CHECK') {
     console.log(`Starting Trading Cycle: ${type}`);
     const db = getPool();
 
     // 1. Sync Current Prices for Holdings
     const holdings = await getHoldings();
     let totalEquity = 0;
+
+    const isPortfolioOnly = type === 'PORTFOLIO_CHECK';
 
     for (const holding of holdings) {
         try {
@@ -71,8 +73,8 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
             if (price) {
                 totalEquity += price * holding.shares;
 
-                // Enhanced Stop Loss / Take Profit (runs at MID and CLOSE)
-                if (type === 'MID' || type === 'CLOSE') {
+                // Stop Loss / Take Profit (MID, CLOSE, or any PORTFOLIO_CHECK)
+                if (type === 'MID' || type === 'CLOSE' || isPortfolioOnly) {
                     const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
                     const daysHeld = holding.opened_at ? (Date.now() - new Date(holding.opened_at).getTime()) / (1000 * 60 * 60 * 24) : 0;
 
@@ -149,24 +151,40 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
         }
     }
 
-    // 3. Enhanced Buy Logic (more frequent, lower thresholds)
+    // Heartbeat so cloud status widget shows last run even when there are no holdings
+    try {
+        await saveAnalysisResult({
+            ticker: '_cycle',
+            action: 'HOLD',
+            confidence: 0,
+            reason: `Cycle ${type} completed`,
+        });
+    } catch (e) { console.error('Heartbeat save failed', e); }
+
+    // 3. Buy Logic: only on OPEN/MID/CLOSE (skip on PORTFOLIO_CHECK)
+    if (isPortfolioOnly) {
+        console.log('PORTFOLIO_CHECK: skipping buy scan.');
+        return;
+    }
+
     const freshStatus = await getPortfolioStatus();
     const updatedHoldings = await getHoldings();
 
-    // Lower cash requirement: $3000 (was $5000) and allow up to 18 positions (was 15)
-    if (freshStatus.cash_balance > 3000 && updatedHoldings.length < 18) {
+    // Max 10 positions, min $3k cash. Buy at most 1–2 per cycle for stable ~5% weekly ROI.
+    const MAX_POSITIONS = 12;
+    if (freshStatus.cash_balance > 3000 && updatedHoldings.length < MAX_POSITIONS) {
         const candidates = await getBuyCandidates();
 
-        // Buy top 2-3 candidates (was 1-2) for more diversification
-        for (const candidate of candidates.slice(0, 3)) {
+        // Buy top 1–2 candidates only (limited risk)
+        for (const candidate of candidates.slice(0, 2)) {
             if (updatedHoldings.find(h => h.ticker === candidate.ticker)) continue;
 
-            // Dynamic position sizing: 8-12% based on confidence (was fixed 10%)
+            // Position sizing: ~10% per name, cap at 70% of cash per trade (limited risk)
             const baseSize = freshStatus.total_value * 0.1;
             const confidenceMultiplier = candidate.confidence / 100;
             const positionSize = Math.min(
-                baseSize * (0.8 + confidenceMultiplier * 0.4), // 8-12% range
-                freshStatus.cash_balance * 0.8 // Don't use more than 80% of cash
+                baseSize * (0.8 + confidenceMultiplier * 0.4),
+                freshStatus.cash_balance * 0.7
             );
 
             if (positionSize < 1000) continue;

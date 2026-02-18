@@ -15,7 +15,7 @@ export default async function handler(
     try {
         const db = getPool();
 
-        // Check latest analysis from Oracle service (if table exists)
+        // Latest cycle or analysis (includes heartbeat from runTradingCycle)
         const result = await db.query(`
             SELECT MAX(analyzed_at) AS last_at
             FROM trading_analysis_results
@@ -26,7 +26,7 @@ export default async function handler(
         if (!lastAt) {
             return res.status(200).json({
                 ok: false,
-                message: 'No analysis data found yet',
+                message: 'No runs yet',
                 lastAnalysisAt: null,
                 lastAnalysisMinutesAgo: null,
             });
@@ -36,13 +36,13 @@ export default async function handler(
         const diffMs = now.getTime() - new Date(lastAt).getTime();
         const diffMinutes = diffMs / (1000 * 60);
 
-        const isRecent = diffMinutes <= 90; // within last 90 minutes
+        const isRecent = diffMinutes <= 90;
 
         return res.status(200).json({
             ok: isRecent,
             message: isRecent
-                ? 'Cloud analysis active'
-                : 'Cloud analysis stale (last run over 90 minutes ago)',
+                ? 'Cloud trading active'
+                : 'Cloud trading idle (last run over 90 minutes ago)',
             lastAnalysisAt: new Date(lastAt).toISOString(),
             lastAnalysisMinutesAgo: Number(diffMinutes.toFixed(1)),
         });
