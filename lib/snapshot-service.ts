@@ -49,15 +49,17 @@ import { MarketDataService } from './market-data';
  * Note: VWAP is approximated from daily typical price to save API calls.
  */
 async function fetchIntradayAndRVOL(ticker: string): Promise<{
-    o: number; h: number; l: number; c: number; v: number;
-    vwap: number; rvol: number;
+    data: {
+        o: number; h: number; l: number; c: number; v: number;
+        vwap: number; rvol: number;
+    } | null;
+    error?: string;
 } | null> {
     try {
-        const data = await MarketDataService.getIntradayAndRVOL(ticker);
-        return data;
+        return await MarketDataService.getIntradayAndRVOL(ticker);
     } catch (e) {
         console.warn(`[Snapshot] Fetch failed for ${ticker}:`, (e as Error).message);
-        return null; // Fail gracefully so we can count failures
+        return { data: null, error: (e as Error).message };
     }
 }
 
@@ -65,7 +67,7 @@ async function fetchIntradayAndRVOL(ticker: string): Promise<{
  * Twice-daily snapshot: 9:35 ET (OPEN) or 2:00 ET (MID).
  * Saves for: holdings + buy candidates (top 75 from screener).
  */
-export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Promise<{ ok: number; fail: number }> {
+export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Promise<{ ok: number; fail: number; errors: any[] }> {
     await initPortfolioTables();
 
     const holdings = await getHoldings();
@@ -88,10 +90,19 @@ export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Pro
     const allTickers = [...new Set([...tickersFromHoldings, ...tickersFromScreener])];
     const now = new Date().toISOString();
     let ok = 0, fail = 0;
+    const errors: any[] = [];
 
     for (const ticker of allTickers) {
-        const data = await fetchIntradayAndRVOL(ticker);
-        if (!data) { fail++; continue; }
+        const result = await fetchIntradayAndRVOL(ticker);
+
+        if (!result || !result.data) {
+            fail++;
+            errors.push({ ticker, error: result?.error || 'Unknown error' });
+            continue;
+        }
+
+        const data = result.data;
+
         try {
             await saveDailySnapshot({
                 ticker,
@@ -106,12 +117,13 @@ export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Pro
                 rvol: data.rvol,
             });
             ok++;
-        } catch (e) {
+        } catch (e: any) {
             fail++;
+            errors.push({ ticker, error: `DB Save Error: ${e.message}` });
         }
     }
 
-    return { ok, fail };
+    return { ok, fail, errors };
 }
 
 /**
@@ -128,8 +140,11 @@ export async function runHoldings10MinPing(): Promise<{ ok: number; fail: number
     let ok = 0, fail = 0;
 
     for (const h of holdings) {
-        const data = await fetchIntradayAndRVOL(h.ticker);
-        if (!data) { fail++; continue; }
+        const result = await fetchIntradayAndRVOL(h.ticker);
+
+        if (!result || !result.data) { fail++; continue; }
+        const data = result.data;
+
         try {
             await saveIntradayBar({
                 ticker: h.ticker,

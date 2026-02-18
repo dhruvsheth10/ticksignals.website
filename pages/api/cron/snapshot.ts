@@ -31,13 +31,14 @@ export default async function handler(
     }
 
     try {
-        const { ok, fail } = await runTwiceDailySnapshot(type as 'OPEN' | 'MID');
+        const { ok, fail, errors } = await runTwiceDailySnapshot(type as 'OPEN' | 'MID');
         res.status(200).json({
             status: 'Success',
             type,
             ok,
             fail,
             message: `${ok} snapshots saved, ${fail} failed`,
+            errors: errors.length > 0 ? errors : undefined,
         });
     } catch (e: any) {
         console.error('[Cron Snapshot]', e);

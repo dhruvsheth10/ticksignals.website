@@ -162,9 +162,12 @@ export class MarketDataService {
      * For RVOL we need: Today's Intraday Volume (so far) + 30-day Average Daily Volume.
      */
     static async getIntradayAndRVOL(ticker: string): Promise<{
-        o: number; h: number; l: number; c: number; v: number;
-        vwap: number; rvol: number;
-    } | null> {
+        data: {
+            o: number; h: number; l: number; c: number; v: number;
+            vwap: number; rvol: number;
+        } | null;
+        error?: string;
+    }> {
         try {
             // We use Finnhub 'D' (daily) resolution to get both history and "today so far".
             // Finnhub's last candle in 'D' results is the current incomplete day candle.
@@ -174,7 +177,12 @@ export class MarketDataService {
 
             const data = await this.fetchFinnhub(ticker, 'D', from, to);
 
-            if (data.s !== 'ok' || !data.t || data.t.length < 2) return null;
+            if (data.s !== 'ok') {
+                return { data: null, error: `Finnhub error: ${data.s} (check key or limits)` };
+            }
+            if (!data.t || data.t.length < 2) {
+                return { data: null, error: `Finnhub: Insufficient data (t=${data.t?.length})` };
+            }
 
             const len = data.t.length;
             const today = {
@@ -195,22 +203,23 @@ export class MarketDataService {
             const rvol = avgVol > 0 ? today.v / avgVol : 1;
 
             // Approximate VWAP from today's candle (Typical Price)
-            // Real VWAP needs intraday bars. Using (H+L+C)/3 is decent approx for daily.
             const vwap = (today.h + today.l + today.c) / 3;
 
             return {
-                o: today.o,
-                h: today.h,
-                l: today.l,
-                c: today.c,
-                v: today.v,
-                vwap,
-                rvol
+                data: {
+                    o: today.o,
+                    h: today.h,
+                    l: today.l,
+                    c: today.c,
+                    v: today.v,
+                    vwap,
+                    rvol
+                }
             };
 
-        } catch (e) {
+        } catch (e: any) {
             console.warn(`[MarketData] Intraday fetch failed for ${ticker}`, e);
-            return null;
+            return { data: null, error: `Exception: ${e.message}` };
         }
     }
 
