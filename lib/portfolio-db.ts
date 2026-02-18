@@ -18,7 +18,9 @@ export interface PortfolioHolding {
     current_price: number;
     market_value: number;
     return_pct: number;
+    return_pct: number;
     last_updated: string;
+    opened_at: string;
 }
 
 // Portfolio Transaction Interface
@@ -80,7 +82,8 @@ export async function initPortfolioTables(): Promise<void> {
         current_price REAL,
         market_value REAL,
         return_pct REAL,
-        last_updated TIMESTAMPTZ DEFAULT NOW()
+        last_updated TIMESTAMPTZ DEFAULT NOW(),
+        opened_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
 
@@ -212,8 +215,8 @@ export async function executeTrade(
                 ]);
             } else {
                 await client.query(`
-          INSERT INTO portfolio_holdings (ticker, shares, avg_cost, current_price, market_value)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO portfolio_holdings (ticker, shares, avg_cost, current_price, market_value, opened_at)
+          VALUES ($1, $2, $3, $4, $5, NOW())
         `, [ticker, shares, price, price, totalAmount]);
             }
         } else {

@@ -74,26 +74,31 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE') {
                 // Enhanced Stop Loss / Take Profit (runs at MID and CLOSE)
                 if (type === 'MID' || type === 'CLOSE') {
                     const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
+                    const daysHeld = holding.opened_at ? (Date.now() - new Date(holding.opened_at).getTime()) / (1000 * 60 * 60 * 24) : 0;
 
-                    // Stop Loss: -7% (slightly tighter for faster exits)
-                    if (returnPct < -7) {
-                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Stop Loss Hit (${returnPct.toFixed(1)}%)`);
+                    // 1. Tighter Stop Loss (-4%)
+                    if (returnPct < -4) {
+                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Hard Stop Loss (-4%) Hit (${returnPct.toFixed(1)}%)`);
                         totalEquity -= price * holding.shares;
                         continue;
                     }
 
-                    // Partial Profit Taking: Sell 50% at +15%, 25% more at +25%
-                    if (returnPct >= 25 && holding.shares > 0) {
-                        const sellShares = Math.floor(holding.shares * 0.25);
-                        if (sellShares > 0) {
-                            await executeTrade(holding.ticker, 'SELL', sellShares, price, `Take Profit 25% (${returnPct.toFixed(1)}%)`);
-                            totalEquity -= price * sellShares;
-                        }
-                    } else if (returnPct >= 15 && holding.shares > 0) {
-                        const sellShares = Math.floor(holding.shares * 0.5);
-                        if (sellShares > 0) {
-                            await executeTrade(holding.ticker, 'SELL', sellShares, price, `Take Profit 15% (${returnPct.toFixed(1)}%)`);
-                            totalEquity -= price * sellShares;
+                    // 2. Take Profit (+6% to +8%)
+                    if (returnPct >= 6 && holding.shares > 0) {
+                        // Secure profit quickly
+                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Take Profit Target Hit (+6%+)`);
+                        totalEquity -= price * holding.shares;
+                        continue;
+                    }
+
+                    // 3. Time-Based Drift Logic (> 3 Days)
+                    if (daysHeld > 3 && returnPct < 0) {
+                        // If holding > 3 days and red, check forecast
+                        const signal = await analyzeTicker(holding.ticker);
+                        if (signal.action === 'SELL' || signal.confidence < 40) {
+                            await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Time Exit (>3 days red) + Weak Analysis`);
+                            totalEquity -= price * holding.shares;
+                            continue;
                         }
                     }
                 }
@@ -270,18 +275,20 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
         const buySignals: string[] = [];
         let buyConfidence = 0;
 
-        // 1. Trend Analysis
-        const isUptrend = indicators.sma50 > indicators.sma200 && current.close > indicators.sma200;
-        const isStrongUptrend = indicators.sma50 > indicators.sma200 * 1.05 && current.close > indicators.sma50;
+        // 1. Trend Analysis (EMA 10/50)
+        // Strong Uptrend: Price > EMA10 > EMA50
+        const isUptrend = indicators.sma50 > indicators.sma200; // actually EMA10 > EMA50
+        const priceAboveTrend = current.close > indicators.sma200; // Price > EMA50
 
-        if (isUptrend || isStrongUptrend) {
-            // 2. RSI Analysis (more flexible thresholds)
-            if (indicators.rsi < 50) { // More lenient: was 45
-                buyConfidence += 25;
-                buySignals.push(`RSI ${Math.round(indicators.rsi)} (oversold)`);
-            } else if (indicators.rsi < 60 && isStrongUptrend) {
+        if (isUptrend && priceAboveTrend) {
+            // 2. RSI Analysis (Dip Buying in Uptrend)
+            if (indicators.rsi < 45) {
+                buyConfidence += 30; // High confidence for dip buy
+                buySignals.push(`RSI ${Math.round(indicators.rsi)} (Dip in Uptrend)`);
+            } else if (indicators.rsi < 55 && current.close > indicators.sma50) {
+                // Momentum buy: RSI not overbought, price above EMA10
                 buyConfidence += 15;
-                buySignals.push(`RSI ${Math.round(indicators.rsi)} (momentum)`);
+                buySignals.push(`Momentum (Price > EMA10, RSI ${Math.round(indicators.rsi)})`);
             }
 
             // 3. MACD Analysis
@@ -431,11 +438,11 @@ function calculateIndicators(
 ): TechnicalIndicators {
     const current = closes[closes.length - 1];
 
-    // SMA 50 & 200
-    const sum50 = closes.slice(-50).reduce((a, b) => a + b, 0);
-    const sma50 = sum50 / 50;
-    const sum200 = closes.slice(-200).reduce((a, b) => a + b, 0);
-    const sma200 = sum200 / 200;
+    // EMA 10 & 50 (Faster trend detection)
+    const ema10Array = calculateEMA(closes, 10);
+    const ema50Array = calculateEMA(closes, 50);
+    const sma50 = ema10Array[ema10Array.length - 1] || 0; // Using sma50 field for EMA10 to keep interface
+    const sma200 = ema50Array[ema50Array.length - 1] || 0; // Using sma200 field for EMA50
 
     // RSI
     const rsi = calculateRSI(closes, 14);

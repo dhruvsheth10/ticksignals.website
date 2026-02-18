@@ -153,11 +153,13 @@ export default async function handler(
     res: NextApiResponse
 ) {
     try {
-        const isVercelCron = req.headers['x-vercel-cron'] === '1'
-            || req.headers.authorization === `Bearer ${process.env.CRON_SECRET}`;
+        const isAuthorizedCron = req.headers['x-vercel-cron'] === '1'
+            || req.headers.authorization === `Bearer ${process.env.CRON_SECRET}`
+            || (req.query.key === process.env.CRON_SECRET && process.env.CRON_SECRET);
 
         // ── GET: return cached data ──
-        if (req.method === 'GET' && !isVercelCron) {
+        // Only skip the scan return if we aren't trying to force a scan via GET
+        if (req.method === 'GET' && !isAuthorizedCron && req.query.force !== 'true') {
             try {
                 await initScreenerTable();
                 const stocks = await getScreenerData();
@@ -173,17 +175,22 @@ export default async function handler(
             }
         }
 
-        // ── POST / Cron: run scan ──
-        if (req.method === 'POST' || isVercelCron) {
-            // Password Check (skip for Cron)
-            if (!isVercelCron) {
-                const { password } = req.body;
-                if (!password) {
-                    return res.status(401).json({ error: 'Password required' });
-                }
-                const hash = crypto.createHash('sha256').update(password).digest('hex');
-                if (hash !== SCAN_PASSWORD_HASH) {
-                    return res.status(401).json({ error: 'Invalid password' });
+        // ── POST / Cron / Forced GET: run scan ──
+        if (req.method === 'POST' || isAuthorizedCron || (req.method === 'GET' && req.query.force === 'true')) {
+            // Security Check
+            if (!isAuthorizedCron) {
+                if (req.method === 'POST') {
+                    const { password } = req.body;
+                    if (!password) {
+                        return res.status(401).json({ error: 'Password required' });
+                    }
+                    const hash = crypto.createHash('sha256').update(password).digest('hex');
+                    if (hash !== SCAN_PASSWORD_HASH) {
+                        return res.status(401).json({ error: 'Invalid password' });
+                    }
+                } else {
+                    // It's a GET with force=true but missing key
+                    return res.status(401).json({ error: 'Unauthorized: Missing or invalid key' });
                 }
             }
 
@@ -194,7 +201,7 @@ export default async function handler(
             // ── Rate Limiting / Cooldown ──
             // Prevent spam-clicking: if data is < 15 mins old, don't re-scan unless forced or cron
             const meta = await getScanMetadata();
-            if (!isVercelCron && req.query.force !== 'true' && meta.lastUpdated) {
+            if (!isAuthorizedCron && req.query.force !== 'true' && meta.lastUpdated) {
                 const last = new Date(meta.lastUpdated);
                 const now = new Date();
                 const diffMs = now.getTime() - last.getTime();
@@ -234,31 +241,28 @@ export default async function handler(
             if (hasSession) {
                 // Use v7 batch quote (50 at a time) — includes mcap, PE, divYield
                 const BATCH = 50;
-                for (let i = 0; i < allTickers.length; i += BATCH) {
-                    const batch = allTickers.slice(i, i + BATCH);
-                    try {
-                        const quotes = await batchQuoteV7(batch, session!);
-                        for (const q of quotes) {
-                            if (q?.symbol) quoteMap[q.symbol] = q;
-                        }
-                    } catch (err: any) {
-                        if (err.message === 'rate-limited') {
-                            console.warn(`[Screener] v7 rate limited at batch ${i}, waiting 10s...`);
-                            await sleep(10000);
-                            // Retry once
+                // Process batches in parallel chunks (e.g., 5 batches at once) to speed up
+                const PARALLEL_BATCHES = 5;
+                for (let i = 0; i < allTickers.length; i += BATCH * PARALLEL_BATCHES) {
+                    const chunkPromises = [];
+                    for (let j = 0; j < PARALLEL_BATCHES; j++) {
+                        const start = i + (j * BATCH);
+                        if (start >= allTickers.length) break;
+                        const batch = allTickers.slice(start, start + BATCH);
+
+                        chunkPromises.push((async () => {
                             try {
                                 const quotes = await batchQuoteV7(batch, session!);
                                 for (const q of quotes) {
                                     if (q?.symbol) quoteMap[q.symbol] = q;
                                 }
-                            } catch {
-                                console.warn(`[Screener] v7 retry also failed at batch ${i}`);
+                            } catch (err: any) {
+                                console.warn(`[Screener] Batch error at ${start}: ${err.message}`);
                             }
-                        } else {
-                            console.warn(`[Screener] v7 batch ${i} error: ${err.message}`);
-                        }
+                        })());
                     }
-                    if (i + BATCH < allTickers.length) await sleep(300);
+                    await Promise.all(chunkPromises);
+                    if (i + (BATCH * PARALLEL_BATCHES) < allTickers.length) await sleep(200);
                 }
                 console.log(`[Screener] Phase 1 (v7): ${Object.keys(quoteMap).length} quotes`);
             }
