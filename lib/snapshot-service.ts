@@ -3,7 +3,7 @@
  * - Twice daily (9:35 ET, 2:00 ET): holdings + buy candidates, keep 5 days
  * - 10-min: holdings only, keep until EOD (even if sold that day)
  */
-import yahooFinance from 'yahoo-finance2';
+// import yahooFinance from 'yahoo-finance2'; // Removed, using MarketDataService
 import {
     getHoldings,
     saveDailySnapshot,
@@ -41,35 +41,23 @@ function roundTo10Min(iso: string): string {
 /**
  * Fetch intraday OHLCV + 30-day avg volume for RVOL
  */
+import { MarketDataService } from './market-data';
+
+/**
+ * Fetch intraday OHLCV + 30-day avg volume for RVOL
+ * Uses MarketDataService (Finnhub primary) to avoid Yahoo rate limits.
+ * Note: VWAP is approximated from daily typical price to save API calls.
+ */
 async function fetchIntradayAndRVOL(ticker: string): Promise<{
     o: number; h: number; l: number; c: number; v: number;
     vwap: number; rvol: number;
 } | null> {
     try {
-        // 1. Intraday (5m bars for today)
-        const intra = await yahooFinance.chart(ticker, { period1: '1d', interval: '5m' }) as any;
-        const intraQuotes = intra?.quotes?.filter((q: any) => q.open != null || q.close != null) ?? [];
-        if (intraQuotes.length === 0) return null;
-
-        const last = intraQuotes[intraQuotes.length - 1];
-        const o = last.open ?? last.close ?? 0;
-        const h = Math.max(...intraQuotes.map((q: any) => q.high ?? q.close ?? 0));
-        const l = Math.min(...intraQuotes.map((q: any) => q.low ?? q.close ?? o));
-        const c = last.close ?? last.open ?? o;
-        const v = intraQuotes.reduce((sum: number, q: any) => sum + (q.volume ?? 0), 0);
-        const vwap = computeVWAP(intraQuotes);
-
-        // 2. 30-day daily chart for avg volume
-        const daily = await yahooFinance.chart(ticker, { period1: '30d', interval: '1d' }) as any;
-        const dailyQuotes = daily?.quotes ?? [];
-        const volumes = dailyQuotes.map((q: any) => q.volume ?? 0).filter((x: number) => x > 0);
-        const avg30 = volumes.length > 0 ? volumes.reduce((a: number, b: number) => a + b, 0) / volumes.length : v;
-        const rvol = avg30 > 0 ? v / avg30 : 1;
-
-        return { o, h, l, c, v, vwap, rvol };
+        const data = await MarketDataService.getIntradayAndRVOL(ticker);
+        return data;
     } catch (e) {
         console.warn(`[Snapshot] Fetch failed for ${ticker}:`, (e as Error).message);
-        return null;
+        return null; // Fail gracefully so we can count failures
     }
 }
 

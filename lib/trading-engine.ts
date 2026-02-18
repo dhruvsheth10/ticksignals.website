@@ -1,7 +1,7 @@
 
 import { getPool } from './db';
 import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars } from './portfolio-db';
-import yahooFinance from 'yahoo-finance2';
+import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
 
 export interface TradeSignal {
@@ -72,8 +72,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     for (const holding of holdings) {
         try {
-            const quote = await yahooFinance.quote(holding.ticker) as any;
-            const price = quote.regularMarketPrice;
+            const price = await MarketDataService.getCurrentPrice(holding.ticker);
             if (price) {
                 totalEquity += price * holding.shares;
 
@@ -146,14 +145,16 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         // Lower threshold: 65% (was 70%) for more frequent sells
         if (signal.action === 'SELL' && signal.confidence >= 65) {
             try {
-                const quote = await yahooFinance.quote(holding.ticker) as any;
-                await executeTrade(holding.ticker, 'SELL', holding.shares, quote.regularMarketPrice, signal.reason);
-                summaryLines.push(`  -> SELL executed ${holding.ticker}`);
-                const freshStatus = await getPortfolioStatus();
-                await updatePortfolioStatus(
-                    freshStatus.cash_balance + (holding.shares * quote.regularMarketPrice),
-                    totalEquity - (holding.shares * quote.regularMarketPrice)
-                );
+                const currentPrice = await MarketDataService.getCurrentPrice(holding.ticker);
+                if (currentPrice) {
+                    await executeTrade(holding.ticker, 'SELL', holding.shares, currentPrice, signal.reason);
+                    summaryLines.push(`  -> SELL executed ${holding.ticker}`);
+                    const freshStatus = await getPortfolioStatus();
+                    await updatePortfolioStatus(
+                        freshStatus.cash_balance + (holding.shares * currentPrice),
+                        totalEquity - (holding.shares * currentPrice)
+                    );
+                }
             } catch (e) { console.error(e); }
         }
     }
@@ -226,17 +227,20 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         }
 
         try {
-            const quote = await yahooFinance.quote(candidate.ticker) as any;
-            const shares = Math.floor(positionSize / quote.regularMarketPrice);
+            const currentPrice = await MarketDataService.getCurrentPrice(candidate.ticker);
 
-            if (shares > 0) {
-                await executeTrade(candidate.ticker, 'BUY', shares, quote.regularMarketPrice, candidate.reason);
-                bought.push(`${candidate.ticker} (${shares} shares)`);
-                const postBuyStatus = await getPortfolioStatus();
-                await updatePortfolioStatus(
-                    postBuyStatus.cash_balance - (shares * quote.regularMarketPrice),
-                    postBuyStatus.total_equity + (shares * quote.regularMarketPrice)
-                );
+            if (currentPrice) {
+                const shares = Math.floor(positionSize / currentPrice);
+
+                if (shares > 0) {
+                    await executeTrade(candidate.ticker, 'BUY', shares, currentPrice, candidate.reason);
+                    bought.push(`${candidate.ticker} (${shares} shares)`);
+                    const postBuyStatus = await getPortfolioStatus();
+                    await updatePortfolioStatus(
+                        postBuyStatus.cash_balance - (shares * currentPrice),
+                        postBuyStatus.total_equity + (shares * currentPrice)
+                    );
+                }
             }
         } catch (e) { console.error(e); }
     }
@@ -339,10 +343,9 @@ async function getHistoricalContext(ticker: string): Promise<{ rvol: number; vwa
  */
 async function analyzeTicker(ticker: string): Promise<TradeSignal> {
     try {
-        const chart = await yahooFinance.chart(ticker, { period1: '200d', interval: '1d' }) as any;
-        const quotes = chart.quotes;
+        const quotes = await MarketDataService.getDailyCandles(ticker, 200);
 
-        if (quotes.length < 200) return { ticker, action: 'HOLD', reason: 'Not enough data', confidence: 0 };
+        if (quotes.length < 50) return { ticker, action: 'HOLD', reason: 'Not enough data', confidence: 0 }; // Need at least 50 for SMA50
 
         const current = quotes[quotes.length - 1];
         const closes = quotes.map((q: any) => q.close || 0);
