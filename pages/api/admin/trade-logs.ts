@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
-import { getPool, getCycleLogs } from '../../../lib/db';
+import { getTransactions, getCycleLogs, getAnalysisResults } from '../../../lib/portfolio-db';
 
 // Same admin password hash as screener admin (sha256 of plain password)
 // Keep this in sync with SCAN_PASSWORD_HASH in pages/api/screener.ts
@@ -34,55 +34,28 @@ export default async function handler(
             return res.status(401).json({ ok: false, error: 'Invalid password' });
         }
 
-        const db = getPool();
-
         const max = Math.min(Number(limit) || 50, 200);
 
-        // Last trades
-        const tradesResult = await db.query(
-            `
-            SELECT date, ticker, type, shares, price, total_amount, notes
-            FROM portfolio_transactions
-            ORDER BY date DESC
-            LIMIT $1
-            `,
-            [max]
-        );
+        const [trades, analysis, cycleLogs] = await Promise.all([
+            getTransactions(max),
+            getAnalysisResults(max).catch(() => []),
+            getCycleLogs(max),
+        ]);
 
-        // Recent analysis logs from Oracle analyzer
-        let analysis: any[] = [];
-        try {
-            const analysisResult = await db.query(
-                `
-                SELECT ticker,
-                       action,
-                       confidence,
-                       reason,
-                       sentiment_score,
-                       sentiment_confidence,
-                       rsi,
-                       macd_histogram,
-                       volume_ratio,
-                       price_change_pct,
-                       sma50,
-                       sma200,
-                       analyzed_at
-                FROM trading_analysis_results
-                ORDER BY analyzed_at DESC
-                LIMIT $1
-                `,
-                [max]
-            );
-            analysis = analysisResult.rows;
-        } catch (err: any) {
-            console.warn('[AdminLogs] trading_analysis_results not available:', err.message);
-        }
-
-        const cycleLogs = await getCycleLogs(max);
+        // Normalize trades for response (date, ticker, type, shares, price, total_amount, notes)
+        const tradesFormatted = trades.map(t => ({
+            date: t.date,
+            ticker: t.ticker,
+            type: t.type,
+            shares: t.shares,
+            price: t.price,
+            total_amount: t.total_amount,
+            notes: t.notes,
+        }));
 
         return res.status(200).json({
             ok: true,
-            trades: tradesResult.rows,
+            trades: tradesFormatted,
             analysis,
             cycleLogs,
         });

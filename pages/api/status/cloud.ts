@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getPool } from '../../../lib/db';
+import { getLastAnalysisAt } from '../../../lib/portfolio-db';
 
 type CloudStatusResponse = {
     ok: boolean;
@@ -13,15 +13,7 @@ export default async function handler(
     res: NextApiResponse<CloudStatusResponse>
 ) {
     try {
-        const db = getPool();
-
-        // Latest cycle or analysis (includes heartbeat from runTradingCycle)
-        const result = await db.query(`
-            SELECT MAX(analyzed_at) AS last_at
-            FROM trading_analysis_results
-        `);
-
-        const lastAt: Date | null = result.rows[0]?.last_at || null;
+        const lastAt = await getLastAnalysisAt();
 
         if (!lastAt) {
             return res.status(200).json({
@@ -33,7 +25,8 @@ export default async function handler(
         }
 
         const now = new Date();
-        const diffMs = now.getTime() - new Date(lastAt).getTime();
+        const lastDate = typeof lastAt === 'string' ? new Date(lastAt) : lastAt;
+        const diffMs = now.getTime() - lastDate.getTime();
         const diffMinutes = diffMs / (1000 * 60);
 
         const isRecent = diffMinutes <= 90;
@@ -43,7 +36,7 @@ export default async function handler(
             message: isRecent
                 ? 'Cloud trading active'
                 : 'Cloud trading idle (last run over 90 minutes ago)',
-            lastAnalysisAt: new Date(lastAt).toISOString(),
+            lastAnalysisAt: lastDate.toISOString(),
             lastAnalysisMinutesAgo: Number(diffMinutes.toFixed(1)),
         });
     } catch (error: any) {

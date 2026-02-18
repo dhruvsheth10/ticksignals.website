@@ -1,6 +1,6 @@
 
-import { getPool, saveAnalysisResult, saveCycleLog } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus } from './portfolio-db';
+import { getPool } from './db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars } from './portfolio-db';
 import yahooFinance from 'yahoo-finance2';
 import { getSentimentScore } from './sentiment';
 
@@ -17,6 +17,8 @@ export interface TradeSignal {
         priceChangePct: number;
         sma50: number;
         sma200: number;
+        rvol?: number;   // relative volume vs 30d avg (from Turso snapshots)
+        vwap?: number;   // intraday VWAP (from Turso intraday bars)
     };
 }
 
@@ -245,7 +247,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         for (const c of top5) {
             const why = updatedHoldings.find(h => h.ticker === c.ticker) ? 'already holding'
                 : c.confidence < 68 ? `confidence ${c.confidence}% < 68%`
-                : 'position size or other';
+                    : 'position size or other';
             summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${why}`);
         }
     }
@@ -312,7 +314,28 @@ async function getBuyCandidates(): Promise<TradeSignal[]> {
 }
 
 /**
- * Analyze a Single Ticker (Enhanced with MACD, Volume, Bollinger Bands, Sentiment)
+ * Get historical context from Turso (5-day snapshots + intraday bars).
+ * Used to enhance buy/sell/hold with RVOL + VWAP when available.
+ */
+async function getHistoricalContext(ticker: string): Promise<{ rvol: number; vwap: number } | null> {
+    try {
+        const [snapshots, intraday] = await Promise.all([
+            getDailySnapshots(ticker, 5),
+            getIntradayBars(ticker),
+        ]);
+        if (snapshots.length === 0 && intraday.length === 0) return null;
+        const latestSnapshot = snapshots[snapshots.length - 1];
+        const latestIntraday = intraday[intraday.length - 1];
+        const rvol = latestSnapshot?.rvol ?? 1;
+        const vwap = latestIntraday?.vwap ?? latestSnapshot?.vwap ?? 0;
+        return { rvol, vwap };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Analyze a Single Ticker (Enhanced with MACD, Volume, Bollinger Bands, Sentiment, RVOL, VWAP)
  */
 async function analyzeTicker(ticker: string): Promise<TradeSignal> {
     try {
@@ -329,6 +352,12 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
 
         // Calculate all technical indicators
         const indicators = calculateIndicators(closes, volumes, highs, lows);
+
+        // Historical context from Turso (RVOL, VWAP)
+        const hist = await getHistoricalContext(ticker);
+        const rvol = hist?.rvol ?? indicators.volumeRatio;
+        const vwap = hist?.vwap ?? 0;
+        const priceAboveVwap = vwap > 0 && current.close > vwap;
 
         // Get sentiment (async, but we'll use it to boost confidence)
         const sentiment = await getSentimentScore(ticker);
@@ -366,6 +395,19 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                 buySignals.push(`Volume +${Math.round((indicators.volumeRatio - 1) * 100)}%`);
             }
 
+            // 4b. RVOL from Turso (relative to 30d avg) — unusual volume = potential breakout
+            if (rvol > 1.5) {
+                buyConfidence += 12;
+                buySignals.push(`RVOL ${rvol.toFixed(1)}x (unusual volume)`);
+            } else if (rvol > 1.2) {
+                buyConfidence += 5;
+            }
+            // 4c. Price above VWAP = bullish intraday
+            if (priceAboveVwap) {
+                buyConfidence += 8;
+                buySignals.push('Price > VWAP');
+            }
+
             // 5. Bollinger Bands (buy near lower band in uptrend)
             const bbPosition = (current.close - indicators.bollingerBands.lower) /
                 (indicators.bollingerBands.upper - indicators.bollingerBands.lower);
@@ -399,7 +441,9 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                         volumeRatio: indicators.volumeRatio,
                         priceChangePct: indicators.priceChange,
                         sma50: indicators.sma50,
-                        sma200: indicators.sma200
+                        sma200: indicators.sma200,
+                        rvol,
+                        vwap: vwap || undefined
                     }
                 };
             }
@@ -448,6 +492,16 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                 sellConfidence += 10;
                 sellSignals.push('High volume decline');
             }
+            // Price below VWAP in downtrend = distribution
+            if (!priceAboveVwap && vwap > 0) {
+                sellConfidence += 8;
+                sellSignals.push('Price < VWAP');
+            }
+            // RVOL spike on decline
+            if (rvol > 1.5 && current.close < quotes[quotes.length - 2]?.close) {
+                sellConfidence += 7;
+                sellSignals.push('RVOL spike on decline');
+            }
 
             if (sellConfidence >= 65) {
                 return {
@@ -462,7 +516,9 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                         volumeRatio: indicators.volumeRatio,
                         priceChangePct: indicators.priceChange,
                         sma50: indicators.sma50,
-                        sma200: indicators.sma200
+                        sma200: indicators.sma200,
+                        rvol,
+                        vwap: vwap || undefined
                     }
                 };
             }
@@ -480,7 +536,9 @@ async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                 volumeRatio: indicators.volumeRatio,
                 priceChangePct: indicators.priceChange,
                 sma50: indicators.sma50,
-                sma200: indicators.sma200
+                sma200: indicators.sma200,
+                rvol,
+                vwap: vwap || undefined
             }
         };
 
