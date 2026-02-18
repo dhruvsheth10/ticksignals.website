@@ -191,7 +191,7 @@ const LivePortfolio = () => {
                                     {data.holdings.length === 0 ? (
                                         <tr>
                                             <td colSpan={6} className="p-8 text-center text-gray-500">
-                                                No active holdings. Waiting for next trading cycle.
+                                                No active holdings.
                                             </td>
                                         </tr>
                                     ) : (
@@ -277,7 +277,7 @@ const LivePortfolio = () => {
                             <div className="flex items-center justify-between border-b border-gray-700 px-4 py-3">
                                 <h2 className="text-sm font-semibold text-white flex items-center gap-2">
                                     <FileText size={16} className="text-aquamarine-400" />
-                                    Admin Trade & Signal Logs
+                                    Trade & Signal Logs
                                 </h2>
                                 <button
                                     type="button"
@@ -291,7 +291,7 @@ const LivePortfolio = () => {
                             {!adminLogs && (
                                 <div className="p-4 border-b border-gray-800">
                                     <p className="text-xs text-gray-400 mb-2">
-                                        Enter admin password to view detailed logs. Password is never stored in the browser.
+                                        Enter admin password
                                     </p>
                                     <form
                                         className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center"

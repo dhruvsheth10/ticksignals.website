@@ -372,7 +372,7 @@ export default function TickerAnalyzer({ initialTicker }: TickerAnalyzerProps) {
               value={ticker}
               onChange={(e) => setTicker(e.target.value.toUpperCase())}
               onKeyDown={(e) => e.key === 'Enter' && analyzeStock()}
-              placeholder="Enter ticker symbol (e.g. AAPL)"
+              placeholder="Enter company symbol"
               className="w-full bg-gray-900/50 border border-gray-700 rounded-lg pl-11 pr-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-aquamarine-500 focus:border-transparent transition-all"
             />
           </div>
