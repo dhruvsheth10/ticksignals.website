@@ -1,5 +1,5 @@
 
-import { getPool, saveAnalysisResult } from './db';
+import { getPool, saveAnalysisResult, saveCycleLog } from './db';
 import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus } from './portfolio-db';
 import yahooFinance from 'yahoo-finance2';
 import { getSentimentScore } from './sentiment';
@@ -59,10 +59,12 @@ export function isMarketOpen(): boolean {
 export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLIO_CHECK') {
     console.log(`Starting Trading Cycle: ${type}`);
     const db = getPool();
+    const summaryLines: string[] = [];
 
     // 1. Sync Current Prices for Holdings
     const holdings = await getHoldings();
     let totalEquity = 0;
+    summaryLines.push(`Holdings: ${holdings.length} (${holdings.map(h => h.ticker).join(', ') || 'none'})`);
 
     const isPortfolioOnly = type === 'PORTFOLIO_CHECK';
 
@@ -81,24 +83,25 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                     // 1. Tighter Stop Loss (-4%)
                     if (returnPct < -4) {
                         await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Hard Stop Loss (-4%) Hit (${returnPct.toFixed(1)}%)`);
+                        summaryLines.push(`  SELL ${holding.ticker}: stop loss -4%`);
                         totalEquity -= price * holding.shares;
                         continue;
                     }
 
                     // 2. Take Profit (+6% to +8%)
                     if (returnPct >= 6 && holding.shares > 0) {
-                        // Secure profit quickly
                         await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Take Profit Target Hit (+6%+)`);
+                        summaryLines.push(`  SELL ${holding.ticker}: take profit +6%`);
                         totalEquity -= price * holding.shares;
                         continue;
                     }
 
                     // 3. Time-Based Drift Logic (> 3 Days)
                     if (daysHeld > 3 && returnPct < 0) {
-                        // If holding > 3 days and red, check forecast
                         const signal = await analyzeTicker(holding.ticker);
                         if (signal.action === 'SELL' || signal.confidence < 40) {
                             await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Time Exit (>3 days red) + Weak Analysis`);
+                            summaryLines.push(`  SELL ${holding.ticker}: time exit (>3d red) + weak analysis`);
                             totalEquity -= price * holding.shares;
                             continue;
                         }
@@ -137,11 +140,13 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                 sma200: signal.indicators?.sma200
             });
         } catch (e) { console.error(`Failed to save analysis for ${holding.ticker}`, e); }
+        summaryLines.push(`  ${holding.ticker}: ${signal.action} (${signal.confidence}%) - ${signal.reason}`);
         // Lower threshold: 65% (was 70%) for more frequent sells
         if (signal.action === 'SELL' && signal.confidence >= 65) {
             try {
                 const quote = await yahooFinance.quote(holding.ticker) as any;
                 await executeTrade(holding.ticker, 'SELL', holding.shares, quote.regularMarketPrice, signal.reason);
+                summaryLines.push(`  -> SELL executed ${holding.ticker}`);
                 const freshStatus = await getPortfolioStatus();
                 await updatePortfolioStatus(
                     freshStatus.cash_balance + (holding.shares * quote.regularMarketPrice),
@@ -163,6 +168,8 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     // 3. Buy Logic: only on OPEN/MID/CLOSE (skip on PORTFOLIO_CHECK)
     if (isPortfolioOnly) {
+        summaryLines.push('PORTFOLIO_CHECK: no buy scan.');
+        try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
         console.log('PORTFOLIO_CHECK: skipping buy scan.');
         return;
     }
@@ -171,40 +178,78 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     const updatedHoldings = await getHoldings();
 
     // Max 10 positions, min $3k cash. Buy at most 1–2 per cycle for stable ~5% weekly ROI.
-    const MAX_POSITIONS = 12;
-    if (freshStatus.cash_balance > 3000 && updatedHoldings.length < MAX_POSITIONS) {
-        const candidates = await getBuyCandidates();
+    const MAX_POSITIONS = 10;
+    const candidates = await getBuyCandidates();
+    const top5 = candidates.slice(0, 5);
 
-        // Buy top 1–2 candidates only (limited risk)
-        for (const candidate of candidates.slice(0, 2)) {
-            if (updatedHoldings.find(h => h.ticker === candidate.ticker)) continue;
-
-            // Position sizing: ~10% per name, cap at 70% of cash per trade (limited risk)
-            const baseSize = freshStatus.total_value * 0.1;
-            const confidenceMultiplier = candidate.confidence / 100;
-            const positionSize = Math.min(
-                baseSize * (0.8 + confidenceMultiplier * 0.4),
-                freshStatus.cash_balance * 0.7
-            );
-
-            if (positionSize < 1000) continue;
-
-            try {
-                const quote = await yahooFinance.quote(candidate.ticker) as any;
-                const shares = Math.floor(positionSize / quote.regularMarketPrice);
-
-                if (shares > 0) {
-                    await executeTrade(candidate.ticker, 'BUY', shares, quote.regularMarketPrice, candidate.reason);
-                    const postBuyStatus = await getPortfolioStatus();
-                    await updatePortfolioStatus(
-                        postBuyStatus.cash_balance - (shares * quote.regularMarketPrice),
-                        postBuyStatus.total_equity + (shares * quote.regularMarketPrice)
-                    );
-                }
-            } catch (e) { console.error(e); }
+    if (freshStatus.cash_balance <= 3000 || updatedHoldings.length >= MAX_POSITIONS) {
+        summaryLines.push(`No buy: ${freshStatus.cash_balance <= 3000 ? 'cash ≤ $3k' : 'max positions (10)'}. Top 5 rejected:`);
+        for (const c of top5) {
+            const reason = freshStatus.cash_balance <= 3000 ? 'low cash' : 'at max positions';
+            summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${reason}`);
         }
+        try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
+        console.log('Trading Cycle Completed');
+        return;
     }
 
+    let bought: string[] = [];
+    for (const candidate of candidates.slice(0, 2)) {
+        if (updatedHoldings.find(h => h.ticker === candidate.ticker)) {
+            if (top5.some(c => c.ticker === candidate.ticker)) {
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - already holding (rejected)`);
+            }
+            continue;
+        }
+
+        const baseSize = freshStatus.total_value * 0.1;
+        const confidenceMultiplier = candidate.confidence / 100;
+        const positionSize = Math.min(
+            baseSize * (0.8 + confidenceMultiplier * 0.4),
+            freshStatus.cash_balance * 0.7
+        );
+
+        if (positionSize < 1000) {
+            if (top5.some(c => c.ticker === candidate.ticker)) {
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - position size < $1000 (rejected)`);
+            }
+            continue;
+        }
+
+        if (candidate.confidence < 68) {
+            if (top5.some(c => c.ticker === candidate.ticker)) {
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - below 68% buy threshold (rejected)`);
+            }
+            continue;
+        }
+
+        try {
+            const quote = await yahooFinance.quote(candidate.ticker) as any;
+            const shares = Math.floor(positionSize / quote.regularMarketPrice);
+
+            if (shares > 0) {
+                await executeTrade(candidate.ticker, 'BUY', shares, quote.regularMarketPrice, candidate.reason);
+                bought.push(`${candidate.ticker} (${shares} shares)`);
+                const postBuyStatus = await getPortfolioStatus();
+                await updatePortfolioStatus(
+                    postBuyStatus.cash_balance - (shares * quote.regularMarketPrice),
+                    postBuyStatus.total_equity + (shares * quote.regularMarketPrice)
+                );
+            }
+        } catch (e) { console.error(e); }
+    }
+
+    if (bought.length) summaryLines.push('Bought: ' + bought.join(', '));
+    else if (top5.length) {
+        summaryLines.push('Top 5 candidates not bought:');
+        for (const c of top5) {
+            const why = updatedHoldings.find(h => h.ticker === c.ticker) ? 'already holding'
+                : c.confidence < 68 ? `confidence ${c.confidence}% < 68%`
+                : 'position size or other';
+            summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${why}`);
+        }
+    }
+    try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
     console.log('Trading Cycle Completed');
 }
 

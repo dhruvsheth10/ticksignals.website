@@ -41,9 +41,11 @@ export default function Home() {
               <h1 className="text-5xl sm:text-6xl md:text-7xl font-bold bg-gradient-to-r from-aquamarine-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent pb-2">
                 TickSignals
               </h1>
-              <div className="mt-2 sm:mt-0">
-                <CloudStatus />
-              </div>
+              {activeTab === 'portfolio' && (
+                <div className="mt-2 sm:mt-0">
+                  <CloudStatus />
+                </div>
+              )}
             </div>
           </div>
         </div>

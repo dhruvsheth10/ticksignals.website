@@ -232,3 +232,38 @@ export async function saveAnalysisResult(data: {
         data.sma200 || null
     ]);
 }
+
+/**
+ * Save a trading cycle log entry (for admin logs: buy/sell/hold logic and top-5 rejection reasons).
+ */
+export async function saveCycleLog(cycleType: string, summary: string): Promise<void> {
+    const db = getPool();
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS trading_cycle_log (
+            id SERIAL PRIMARY KEY,
+            cycle_type VARCHAR(32) NOT NULL,
+            ran_at TIMESTAMPTZ DEFAULT NOW(),
+            summary TEXT NOT NULL
+        )
+    `);
+    await db.query(
+        `INSERT INTO trading_cycle_log (cycle_type, summary) VALUES ($1, $2)`,
+        [cycleType, summary]
+    );
+}
+
+/**
+ * Get recent cycle logs for admin trade-logs API.
+ */
+export async function getCycleLogs(limit: number = 50): Promise<{ cycle_type: string; ran_at: string; summary: string }[]> {
+    try {
+        const db = getPool();
+        const result = await db.query(
+            `SELECT cycle_type, ran_at, summary FROM trading_cycle_log ORDER BY ran_at DESC LIMIT $1`,
+            [limit]
+        );
+        return result.rows;
+    } catch {
+        return [];
+    }
+}

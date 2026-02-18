@@ -104,6 +104,8 @@ const PRESETS: { name: string; icon: any; desc: string; filters: Partial<FilterC
 type SortKey = keyof StockData;
 type SortDir = 'asc' | 'desc';
 
+
+
 interface StockScreenerProps {
     onTickerClick?: (ticker: string) => void;
 }
@@ -210,7 +212,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         return true;
     }, [filters]);
 
-    // Filtered and sorted stocks
+    // Filtered and sorted stocks (numeric sort: nulls last; market_cap etc. as numbers)
     const filteredStocks = useMemo(() => {
         let result = stocks.filter(passesFilter);
 
@@ -223,6 +225,15 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
             if (bVal === null) return -1;
 
             if (typeof aVal === 'string' && typeof bVal === 'string') {
+                // Check if these strings are actually numbers (like '100') which implies BigInt or similar
+                const aNum = Number(aVal);
+                const bNum = Number(bVal);
+
+                // If both are valid numbers and not empty strings, sort numerically
+                if (!isNaN(aNum) && !isNaN(bNum) && aVal.trim() !== '' && bVal.trim() !== '') {
+                    return sortDir === 'asc' ? aNum - bNum : bNum - aNum;
+                }
+
                 return sortDir === 'asc'
                     ? aVal.localeCompare(bVal)
                     : bVal.localeCompare(aVal);
@@ -341,39 +352,6 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         URL.revokeObjectURL(url);
     };
 
-    // Reusable filter input
-    const FilterInput = useCallback(({ label, filterKey, placeholder, prefix }: {
-        label: string; filterKey: keyof FilterConfig; placeholder: string; prefix?: string;
-    }) => (
-        <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-400 font-medium">{label}</label>
-            <div className="relative">
-                {prefix && (
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 text-xs">{prefix}</span>
-                )}
-                <input
-                    type="text"
-                    value={filters[filterKey] === '' ? '' : filters[filterKey]}
-                    onChange={(e) => {
-                        const val = e.target.value;
-                        setFilters(prev => ({
-                            ...prev,
-                            [filterKey]: val === '' ? '' : val,
-                        }));
-                    }}
-                    onBlur={(e) => {
-                        const val = e.target.value;
-                        const num = parseFloat(val);
-                        if (val !== '' && !isNaN(num)) {
-                            setFilters(prev => ({ ...prev, [filterKey]: num }));
-                        }
-                    }}
-                    placeholder={placeholder}
-                    className={`w-full bg-gray-900/60 border border-gray-700/50 rounded-lg ${prefix ? 'pl-6' : 'pl-3'} pr-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-aquamarine-500/50 focus:border-aquamarine-500/50 transition-all`}
-                />
-            </div>
-        </div>
-    ), [filters]);
 
     const SortHeader = ({ label, colKey, className = '' }: { label: string; colKey: SortKey; className?: string }) => (
         <th
@@ -504,22 +482,44 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
 
                     {/* Filter Grid */}
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                        <FilterInput label="Min Price" filterKey="minPrice" placeholder="0" prefix="$" />
-                        <FilterInput label="Max Price" filterKey="maxPrice" placeholder="∞" prefix="$" />
-                        <FilterInput label="Min Market Cap" filterKey="minMarketCap" placeholder="0" />
-                        <FilterInput label="Max Market Cap" filterKey="maxMarketCap" placeholder="∞" />
-                        <FilterInput label="Min P/E" filterKey="minPE" placeholder="0" />
-                        <FilterInput label="Max P/E" filterKey="maxPE" placeholder="∞" />
-                        <FilterInput label="Min ROE %" filterKey="minROE" placeholder="0" />
-                        <FilterInput label="Max ROE %" filterKey="maxROE" placeholder="∞" />
-                        <FilterInput label="Min D/E" filterKey="minDE" placeholder="0" />
-                        <FilterInput label="Max D/E" filterKey="maxDE" placeholder="∞" />
-                        <FilterInput label="Min Gross Margin %" filterKey="minGrossMargin" placeholder="0" />
-                        <FilterInput label="Max Gross Margin %" filterKey="maxGrossMargin" placeholder="∞" />
-                        <FilterInput label="Min Div Yield %" filterKey="minDividendYield" placeholder="0" />
-                        <FilterInput label="Max Div Yield %" filterKey="maxDividendYield" placeholder="∞" />
-                        <FilterInput label="Min ROA %" filterKey="minROA" placeholder="0" />
-                        <FilterInput label="Max ROA %" filterKey="maxROA" placeholder="∞" />
+                        <FilterInput
+                            label="Min Price"
+                            value={filters.minPrice}
+                            onChange={(v) => setFilters(prev => ({ ...prev, minPrice: v }))}
+                            placeholder="0" prefix="$"
+                        />
+                        <FilterInput
+                            label="Max Price"
+                            value={filters.maxPrice}
+                            onChange={(v) => setFilters(prev => ({ ...prev, maxPrice: v }))}
+                            placeholder="∞" prefix="$"
+                        />
+                        <FilterInput
+                            label="Min Market Cap"
+                            value={filters.minMarketCap}
+                            onChange={(v) => setFilters(prev => ({ ...prev, minMarketCap: v }))}
+                            placeholder="e.g. 2B"
+                            isCompact={true}
+                        />
+                        <FilterInput
+                            label="Max Market Cap"
+                            value={filters.maxMarketCap}
+                            onChange={(v) => setFilters(prev => ({ ...prev, maxMarketCap: v }))}
+                            placeholder="e.g. 500B"
+                            isCompact={true}
+                        />
+                        <FilterInput label="Min P/E" value={filters.minPE} onChange={(v) => setFilters(prev => ({ ...prev, minPE: v }))} placeholder="0" />
+                        <FilterInput label="Max P/E" value={filters.maxPE} onChange={(v) => setFilters(prev => ({ ...prev, maxPE: v }))} placeholder="∞" />
+                        <FilterInput label="Min ROE %" value={filters.minROE} onChange={(v) => setFilters(prev => ({ ...prev, minROE: v }))} placeholder="0" />
+                        <FilterInput label="Max ROE %" value={filters.maxROE} onChange={(v) => setFilters(prev => ({ ...prev, maxROE: v }))} placeholder="∞" />
+                        <FilterInput label="Min D/E" value={filters.minDE} onChange={(v) => setFilters(prev => ({ ...prev, minDE: v }))} placeholder="0" />
+                        <FilterInput label="Max D/E" value={filters.maxDE} onChange={(v) => setFilters(prev => ({ ...prev, maxDE: v }))} placeholder="∞" />
+                        <FilterInput label="Min Gross Margin %" value={filters.minGrossMargin} onChange={(v) => setFilters(prev => ({ ...prev, minGrossMargin: v }))} placeholder="0" />
+                        <FilterInput label="Max Gross Margin %" value={filters.maxGrossMargin} onChange={(v) => setFilters(prev => ({ ...prev, maxGrossMargin: v }))} placeholder="∞" />
+                        <FilterInput label="Min Div Yield %" value={filters.minDividendYield} onChange={(v) => setFilters(prev => ({ ...prev, minDividendYield: v }))} placeholder="0" />
+                        <FilterInput label="Max Div Yield %" value={filters.maxDividendYield} onChange={(v) => setFilters(prev => ({ ...prev, maxDividendYield: v }))} placeholder="∞" />
+                        <FilterInput label="Min ROA %" value={filters.minROA} onChange={(v) => setFilters(prev => ({ ...prev, minROA: v }))} placeholder="0" />
+                        <FilterInput label="Max ROA %" value={filters.maxROA} onChange={(v) => setFilters(prev => ({ ...prev, maxROA: v }))} placeholder="∞" />
 
                         {/* Sector Select */}
                         <div className="flex flex-col gap-1 col-span-2">
@@ -632,3 +632,104 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         </div>
     );
 }
+
+// Format compact numbers (e.g. 1.5B, 200M)
+const formatCompactNumber = (number: number | string) => {
+    if (number === '' || number === null || number === undefined) return '';
+    const num = Number(number);
+    if (isNaN(num)) return number.toString();
+    if (num >= 1e12) return +(num / 1e12).toFixed(2) + 'T';
+    if (num >= 1e9) return +(num / 1e9).toFixed(2) + 'B';
+    if (num >= 1e6) return +(num / 1e6).toFixed(2) + 'M';
+    if (num >= 1e3) return +(num / 1e3).toFixed(2) + 'K';
+    return num.toString();
+};
+
+const parseCompactNumber = (text: string) => {
+    if (!text) return '';
+    const clean = text.toString().toUpperCase().replace(/[^0-9.KMBT]/g, '');
+    const multiplier = clean.endsWith('T') ? 1e12 :
+        clean.endsWith('B') ? 1e9 :
+            clean.endsWith('M') ? 1e6 :
+                clean.endsWith('K') ? 1e3 : 1;
+    const num = parseFloat(clean);
+    if (isNaN(num)) return '';
+    return num * multiplier;
+};
+
+// Reusable filter input (outside component to prevent focus loss)
+const FilterInput = ({
+    label,
+    value,
+    onChange,
+    placeholder,
+    prefix,
+    isCompact
+}: {
+    label: string;
+    value: number | string;
+    onChange: (val: number | string) => void;
+    placeholder: string;
+    prefix?: string;
+    isCompact?: boolean;
+}) => {
+    const [localVal, setLocalVal] = useState(
+        value === '' ? '' :
+            isCompact ? formatCompactNumber(value) : String(value)
+    );
+
+    // Sync with external value changes (e.g. reset or presets)
+    useEffect(() => {
+        const formatted = value === '' ? '' : isCompact ? formatCompactNumber(value) : String(value);
+        setLocalVal(formatted);
+    }, [value, isCompact]);
+
+    const handleBlur = () => {
+        let newVal: string | number = localVal;
+        if (isCompact) {
+            const parsed = parseCompactNumber(localVal.toString());
+            if (parsed !== '') {
+                newVal = parsed;
+                setLocalVal(formatCompactNumber(parsed));
+            } else {
+                newVal = '';
+                setLocalVal('');
+            }
+        } else {
+            const num = parseFloat(localVal.toString());
+            if (localVal !== '' && !isNaN(num)) {
+                newVal = num;
+            } else {
+                newVal = '';
+            }
+        }
+
+        onChange(newVal);
+    };
+
+    return (
+        <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-400 font-medium">{label}</label>
+            <div className="relative">
+                {prefix && (
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 text-xs">{prefix}</span>
+                )}
+                <input
+                    type="text"
+                    value={localVal}
+                    onChange={(e) => setLocalVal(e.target.value)}
+                    onBlur={handleBlur}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                            handleBlur();
+                            (e.target as HTMLInputElement).blur();
+                        }
+                    }}
+                    placeholder={placeholder}
+                    className={`w-full bg-gray-900/60 border border-gray-700/50 rounded-lg ${prefix ? 'pl-6' : 'pl-3'} pr-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-aquamarine-500/50 focus:border-aquamarine-500/50 transition-all`}
+                />
+            </div>
+        </div>
+    );
+};
+

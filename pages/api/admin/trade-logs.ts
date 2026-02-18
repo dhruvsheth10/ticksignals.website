@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
-import { getPool } from '../../../lib/db';
+import { getPool, getCycleLogs } from '../../../lib/db';
 
 // Same admin password hash as screener admin (sha256 of plain password)
 // Keep this in sync with SCAN_PASSWORD_HASH in pages/api/screener.ts
@@ -11,6 +11,7 @@ type TradeLogResponse = {
     error?: string;
     trades?: any[];
     analysis?: any[];
+    cycleLogs?: { cycle_type: string; ran_at: string; summary: string }[];
 };
 
 export default async function handler(
@@ -74,14 +75,16 @@ export default async function handler(
             );
             analysis = analysisResult.rows;
         } catch (err: any) {
-            // If table doesn't exist yet, just skip analysis logs
             console.warn('[AdminLogs] trading_analysis_results not available:', err.message);
         }
+
+        const cycleLogs = await getCycleLogs(max);
 
         return res.status(200).json({
             ok: true,
             trades: tradesResult.rows,
             analysis,
+            cycleLogs,
         });
     } catch (error: any) {
         console.error('[AdminLogs] Error:', error.message);
