@@ -342,102 +342,102 @@ const LivePortfolio = () => {
                             )}
 
                             {adminLogs && (
-                                <div className="flex justify-between items-center mb-4">
-                                    <h3 className="font-semibold text-white">Trading Logic Logs</h3>
-                                    <button
-                                        onClick={() => {
-                                            const form = document.querySelector('form');
-                                            if (form) form.requestSubmit();
-                                        }}
-                                        className="text-xs text-aquamarine-400 hover:text-aquamarine-300 flex items-center gap-1"
-                                    >
-                                        <RefreshCw size={12} /> Refresh
-                                    </button>
-                                </div>
-                                    
+                                <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs text-gray-200">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h3 className="font-semibold text-white">Trading Logic Logs</h3>
+                                        <button
+                                            onClick={() => {
+                                                const form = document.querySelector('form');
+                                                if (form) form.requestSubmit();
+                                            }}
+                                            className="text-xs text-aquamarine-400 hover:text-aquamarine-300 flex items-center gap-1"
+                                        >
+                                            <RefreshCw size={12} /> Refresh
+                                        </button>
+                                    </div>
+
                                     {adminLogs.cycleLogs && adminLogs.cycleLogs.length > 0 ? (
-                                <div className="space-y-2 mb-6">
-                                    {adminLogs.cycleLogs.map((entry: any, idx: number) => (
-                                        <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
-                                            <div className="text-aquamarine-500 mb-1 border-b border-gray-700/50 pb-1 flex justify-between">
-                                                <span>{entry.cycle_type}</span>
-                                                <span className="text-gray-500">{new Date(entry.ran_at).toLocaleString()}</span>
-                                            </div>
-                                            <div className="text-gray-300">{entry.summary}</div>
+                                        <div className="space-y-2 mb-6">
+                                            {adminLogs.cycleLogs.map((entry: any, idx: number) => (
+                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
+                                                    <div className="text-aquamarine-500 mb-1 border-b border-gray-700/50 pb-1 flex justify-between">
+                                                        <span>{entry.cycle_type}</span>
+                                                        <span className="text-gray-500">{new Date(entry.ran_at).toLocaleString()}</span>
+                                                    </div>
+                                                    <div className="text-gray-300">{entry.summary}</div>
+                                                </div>
+                                            ))}
                                         </div>
-                                    ))}
-                                </div>
-                            ) : (
-                                <div className="p-4 border border-dashed border-gray-700 rounded-lg text-center text-gray-500 mb-6">
-                                    No cycle logs found. They will appear after the next scheduled trading run.
+                                    ) : (
+                                        <div className="p-4 border border-dashed border-gray-700 rounded-lg text-center text-gray-500 mb-6">
+                                            No cycle logs found. They will appear after the next scheduled trading run.
+                                        </div>
+                                    )}
+
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                        <div>
+                                            <h3 className="mb-2 font-semibold text-white">Recent Trades</h3>
+                                            {adminLogs.trades.length === 0 ? (
+                                                <p className="text-gray-500 text-xs italic">No trades executed yet.</p>
+                                            ) : (
+                                                <div className="space-y-2">
+                                                    {adminLogs.trades.map((tx: any, idx: number) => (
+                                                        <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
+                                                            <div className="flex justify-between items-center mb-1">
+                                                                <span className="font-bold">{tx.ticker}</span>
+                                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{tx.type}</span>
+                                                            </div>
+                                                            <div className="flex justify-between text-gray-400">
+                                                                <span>{tx.shares} @ ${Number(tx.price).toFixed(2)}</span>
+                                                                <span>${Number(tx.total_amount).toLocaleString()}</span>
+                                                            </div>
+                                                            <div className="mt-1 text-[10px] text-gray-500">
+                                                                {new Date(tx.date).toLocaleString()}
+                                                                {tx.notes && ` · ${tx.notes}`}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div>
+                                            <h3 className="mb-2 font-semibold text-white">Recent Signals / Reasons</h3>
+                                            {adminLogs.analysis.length === 0 ? (
+                                                <p className="text-gray-500 text-xs italic">No analysis data available.</p>
+                                            ) : (
+                                                <div className="space-y-2">
+                                                    {adminLogs.analysis.filter((row: any) => row.ticker !== '_cycle').map((row: any, idx: number) => (
+                                                        <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
+                                                            <div className="flex justify-between items-center mb-1">
+                                                                <span className="font-bold">{row.ticker}</span>
+                                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${row.action === 'BUY' ? 'bg-green-500/20 text-green-400' : row.action === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-300'
+                                                                    }`}>{row.action} {row.confidence != null ? `(${row.confidence}%)` : ''}</span>
+                                                            </div>
+                                                            <div className="text-[11px] text-gray-400 mb-1">{row.reason}</div>
+                                                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
+                                                                {row.rsi != null && <span>RSI: {row.rsi.toFixed(1)}</span>}
+                                                                {row.macd_histogram != null && <span>MACD hist: {row.macd_histogram.toFixed(3)}</span>}
+                                                                {row.volume_ratio != null && <span>Vol×: {row.volume_ratio.toFixed(2)}</span>}
+                                                                {row.price_change_pct != null && <span>Δ20d: {row.price_change_pct.toFixed(1)}%</span>}
+                                                                {row.sma50 != null && row.sma200 != null && <span>SMA50/SMA200: {row.sma50.toFixed(2)}/{row.sma200.toFixed(2)}</span>}
+                                                            </div>
+                                                            <div className="mt-1 text-[10px] text-gray-500">{row.analyzed_at && new Date(row.analyzed_at).toLocaleString()}</div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
                             )}
-
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                <div>
-                                    <h3 className="mb-2 font-semibold text-white">Recent Trades</h3>
-                                    {adminLogs.trades.length === 0 ? (
-                                        <p className="text-gray-500 text-xs italic">No trades executed yet.</p>
-                                    ) : (
-                                        <div className="space-y-2">
-                                            {adminLogs.trades.map((tx: any, idx: number) => (
-                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
-                                                    <div className="flex justify-between items-center mb-1">
-                                                        <span className="font-bold">{tx.ticker}</span>
-                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{tx.type}</span>
-                                                    </div>
-                                                    <div className="flex justify-between text-gray-400">
-                                                        <span>{tx.shares} @ ${Number(tx.price).toFixed(2)}</span>
-                                                        <span>${Number(tx.total_amount).toLocaleString()}</span>
-                                                    </div>
-                                                    <div className="mt-1 text-[10px] text-gray-500">
-                                                        {new Date(tx.date).toLocaleString()}
-                                                        {tx.notes && ` · ${tx.notes}`}
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                                <div>
-                                    <h3 className="mb-2 font-semibold text-white">Recent Signals / Reasons</h3>
-                                    {adminLogs.analysis.length === 0 ? (
-                                        <p className="text-gray-500 text-xs italic">No analysis data available.</p>
-                                    ) : (
-                                        <div className="space-y-2">
-                                            {adminLogs.analysis.filter((row: any) => row.ticker !== '_cycle').map((row: any, idx: number) => (
-                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
-                                                    <div className="flex justify-between items-center mb-1">
-                                                        <span className="font-bold">{row.ticker}</span>
-                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${row.action === 'BUY' ? 'bg-green-500/20 text-green-400' : row.action === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-300'
-                                                            }`}>{row.action} {row.confidence != null ? `(${row.confidence}%)` : ''}</span>
-                                                    </div>
-                                                    <div className="text-[11px] text-gray-400 mb-1">{row.reason}</div>
-                                                    <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
-                                                        {row.rsi != null && <span>RSI: {row.rsi.toFixed(1)}</span>}
-                                                        {row.macd_histogram != null && <span>MACD hist: {row.macd_histogram.toFixed(3)}</span>}
-                                                        {row.volume_ratio != null && <span>Vol×: {row.volume_ratio.toFixed(2)}</span>}
-                                                        {row.price_change_pct != null && <span>Δ20d: {row.price_change_pct.toFixed(1)}%</span>}
-                                                        {row.sma50 != null && row.sma200 != null && <span>SMA50/SMA200: {row.sma50.toFixed(2)}/{row.sma200.toFixed(2)}</span>}
-                                                    </div>
-                                                    <div className="mt-1 text-[10px] text-gray-500">{row.analyzed_at && new Date(row.analyzed_at).toLocaleString()}</div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
                         </div>
                     </div>
                 )}
             </div>
-                )}
         </div>
-            </div >
-        </div >
     );
 };
-
 // Simple Icon Component (internal to avoid extra deps if lucide not imported or mismatch)
 const HistoryIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

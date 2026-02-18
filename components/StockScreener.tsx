@@ -668,7 +668,7 @@ const FilterInput = ({
 }: {
     label: string;
     value: number | string;
-    onChange: (val: number | string) => void;
+    onChange: (val: number | '') => void;
     placeholder: string;
     prefix?: string;
     isCompact?: boolean;
@@ -685,7 +685,7 @@ const FilterInput = ({
     }, [value, isCompact]);
 
     const handleBlur = () => {
-        let newVal: string | number = localVal;
+        let newVal: number | '' = localVal as (number | '');
         if (isCompact) {
             const parsed = parseCompactNumber(localVal.toString());
             if (parsed !== '') {
