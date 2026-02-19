@@ -3,7 +3,7 @@ import https from 'https';
 // API Keys - In a real prod environment these should be in .env,
 // but for this specific request we are embedding them as fallbacks/defaults.
 const KEYS = {
-    FINNHUB: 'd6b1ampr01qnr27j99q0d6b1ampr01qnr27j99qg',
+    FINNHUB: 'd6b1ampr01qnr27j99q0', // Trying first half of the provided key
     ALPHA_VANTAGE: 'CMST81YM0KF81G7P',
     EODHD: '68d8b0e042ead9.78441037',
 };
@@ -175,13 +175,19 @@ export class MarketDataService {
             const to = Math.floor(Date.now() / 1000);
             const from = to - (35 * 86400);
 
+            // Debug: check key
+            const maskKey = KEYS.FINNHUB.slice(0, 2) + '...' + KEYS.FINNHUB.slice(-2);
+            console.log(`[MarketData] Finnhub Key: ${maskKey}`);
+
             const data = await this.fetchFinnhub(ticker, 'D', from, to);
 
             if (data.s !== 'ok') {
-                return { data: null, error: `Finnhub error: ${data.s} (check key or limits)` };
+                // 403 usually means premium endpoint or restricted market. Fallback to Alpha Vantage?
+                console.warn(`[MarketData] Finnhub error for ${ticker}: ${data.s} (Code: ${data.s === 'no_data' ? 404 : 403})`);
+                throw new Error(`Finnhub error: ${data.s}`);
             }
             if (!data.t || data.t.length < 2) {
-                return { data: null, error: `Finnhub: Insufficient data (t=${data.t?.length})` };
+                throw new Error(`Finnhub: Insufficient data (t=${data.t?.length})`);
             }
 
             const len = data.t.length;
@@ -194,7 +200,6 @@ export class MarketDataService {
             };
 
             // Calculate Avg Volume from previous 30 days
-            // Filter out 'today' and maybe empty volume days
             const historicalVols = data.v.slice(0, len - 1).filter((v: number) => v > 0);
             const avgVol = historicalVols.length > 0
                 ? historicalVols.reduce((a: number, b: number) => a + b, 0) / historicalVols.length
@@ -202,24 +207,53 @@ export class MarketDataService {
 
             const rvol = avgVol > 0 ? today.v / avgVol : 1;
 
-            // Approximate VWAP from today's candle (Typical Price)
+            // Approximate VWAP
             const vwap = (today.h + today.l + today.c) / 3;
 
             return {
-                data: {
-                    o: today.o,
-                    h: today.h,
-                    l: today.l,
-                    c: today.c,
-                    v: today.v,
-                    vwap,
-                    rvol
-                }
+                data: { o: today.o, h: today.h, l: today.l, c: today.c, v: today.v, vwap, rvol }
             };
 
         } catch (e: any) {
-            console.warn(`[MarketData] Intraday fetch failed for ${ticker}`, e);
-            return { data: null, error: `Exception: ${e.message}` };
+            console.warn(`[MarketData] Finnhub Intraday failed for ${ticker}: ${e.message}. Trying Backup (Alpha Vantage)...`);
+
+            // Backup: Alpha Vantage (TIME_SERIES_DAILY) - Limited to 25/day
+            try {
+                if (STATE.avUsed >= LIMITS.AV_DAILY) throw new Error('Alpha Vantage daily limit reached');
+
+                const avData = await this.fetchAlphaVantage(ticker); // "Time Series (Daily)"
+                const ts = avData['Time Series (Daily)'];
+                if (!ts) throw new Error('No AV data');
+
+                const dates = Object.keys(ts).sort(); // Oldest first
+                if (dates.length < 2) throw new Error('Insufficient AV history');
+
+                const todayDate = dates[dates.length - 1];
+                const todayCandle = ts[todayDate];
+                const today = {
+                    o: parseFloat(todayCandle['1. open']),
+                    h: parseFloat(todayCandle['2. high']),
+                    l: parseFloat(todayCandle['3. low']),
+                    c: parseFloat(todayCandle['4. close']),
+                    v: parseFloat(todayCandle['5. volume'])
+                };
+
+                // Calculate 30d avg volume
+                // dates are sorted, so take slice(-31, -1)
+                const histDates = dates.slice(Math.max(0, dates.length - 31), dates.length - 1);
+                const vols = histDates.map(d => parseFloat(ts[d]['5. volume'])).filter(v => v > 0);
+                const avgVol = vols.length > 0 ? vols.reduce((a, b) => a + b, 0) / vols.length : today.v;
+                const rvol = avgVol > 0 ? today.v / avgVol : 1;
+                const vwap = (today.h + today.l + today.c) / 3;
+
+                return {
+                    data: { o: today.o, h: today.h, l: today.l, c: today.c, v: today.v, vwap, rvol }
+                };
+
+            } catch (avErr: any) {
+                console.warn(`[MarketData] AV Backup failed for ${ticker}: ${avErr.message}`);
+                return { data: null, error: `Finnhub: ${e.message} | AV: ${avErr.message}` };
+            }
         }
     }
 
