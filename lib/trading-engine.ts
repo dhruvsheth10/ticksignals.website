@@ -341,7 +341,7 @@ async function getHistoricalContext(ticker: string): Promise<{ rvol: number; vwa
 /**
  * Analyze a Single Ticker (Enhanced with MACD, Volume, Bollinger Bands, Sentiment, RVOL, VWAP)
  */
-async function analyzeTicker(ticker: string): Promise<TradeSignal> {
+export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
     try {
         const quotes = await MarketDataService.getDailyCandles(ticker, 200);
 

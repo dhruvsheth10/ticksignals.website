@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { TICKER_LIST } from '../../lib/tickers';
 
 const SCAN_PASSWORD_HASH = 'ea4de091b760a4e538140c342585130649e646c54d4939ae7f142bb81d5506fa';
-import { initScreenerTable, upsertScreenerRow, getScreenerData, getScanMetadata } from '../../lib/db';
+import { initScreenerTable, upsertScreenerRow, getScreenerData, getScanMetadata, updateMonitoredProspects, getPool } from '../../lib/db';
 import https from 'https';
 
 function sleep(ms: number): Promise<void> {
@@ -366,13 +366,38 @@ export default async function handler(
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
             console.log(`[Screener] ✅ ${totalProcessed} ok, ${totalFailed} fail in ${duration}s`);
 
+
+
+            // ── Phase 4: Update Monitored Prospects (Top 20 Fundamental Picks) ──
+            try {
+                const db = getPool();
+                const candidates = await db.query(`
+                    SELECT ticker, 
+                           (roe_pct + gross_margin_pct) as score 
+                    FROM screener_cache
+                    WHERE roe_pct > 12 AND gross_margin_pct > 8 AND debt_to_equity < 1.0 AND market_cap > 1000000000
+                    ORDER BY pe_ratio ASC, roe_pct DESC
+                    LIMIT 20
+                `);
+
+                const prospects = candidates.rows.map((r: any) => ({
+                    ticker: r.ticker,
+                    score: r.score || 0
+                }));
+
+                await updateMonitoredProspects(prospects);
+                console.log(`[Screener] Updated monitored prospects: ${prospects.length} tickers`);
+            } catch (e: any) {
+                console.error('[Screener] Failed to update prospects:', e.message);
+            }
+
             return res.status(200).json({
                 success: totalProcessed > 0,
                 processed: totalProcessed,
                 failed: totalFailed,
                 total: allTickers.length,
                 durationSeconds: duration,
-                message: `${totalProcessed} stocks scanned in ${duration}s`,
+                message: `${totalProcessed} stocks scanned in ${duration}s. Prospects updated.`,
             });
         }
 

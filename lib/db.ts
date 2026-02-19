@@ -44,6 +44,11 @@ export async function initScreenerTable(): Promise<void> {
       beta REAL,
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS monitored_prospects (
+      ticker VARCHAR(10) PRIMARY KEY,
+      score REAL,
+      added_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
         useInMemory = false;
     } catch (error: any) {
@@ -156,6 +161,44 @@ export async function getScanMetadata(): Promise<{ count: number; lastUpdated: s
         count: parseInt(result.rows[0]?.count || '0'),
         lastUpdated: result.rows[0]?.last_updated || null,
     };
+}
+
+// Update monitored prospects (replace old list)
+export async function updateMonitoredProspects(prospects: { ticker: string; score: number }[]): Promise<void> {
+    if (useInMemory) return; // No-op for in-memory
+
+    const db = getPool();
+    const client = await db.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query('DELETE FROM monitored_prospects');
+        for (const p of prospects) {
+            await client.query(
+                `INSERT INTO monitored_prospects (ticker, score, added_at) VALUES ($1, $2, NOW())`,
+                [p.ticker, p.score]
+            );
+        }
+        await client.query('COMMIT');
+    } catch (e) {
+        await client.query('ROLLBACK');
+        console.error('[DB] Failed to update prospects:', e);
+    } finally {
+        client.release();
+    }
+}
+
+// Get monitored prospects
+export async function getMonitoredProspects(): Promise<{ ticker: string; score: number }[]> {
+    if (useInMemory) return [];
+
+    const db = getPool();
+    try {
+        const res = await db.query(`SELECT ticker, score FROM monitored_prospects ORDER BY score DESC`);
+        return res.rows;
+    } catch (e) {
+        console.error('[DB] Failed to get prospects:', e);
+        return [];
+    }
 }
 
 // trading_analysis_results, trading_cycle_log, getCycleLogs moved to portfolio-db (Turso)
