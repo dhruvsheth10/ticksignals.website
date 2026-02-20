@@ -246,10 +246,15 @@ const LivePortfolio = () => {
                                                     }`}>
                                                     {tx.type}
                                                 </span>
-                                                <span className="font-bold text-white">{tx.ticker}</span>
+                                                <span className="font-bold text-white tracking-wide">{tx.ticker}</span>
                                             </div>
+                                            {tx.company_name && (
+                                                <div className="text-xs text-gray-400 mb-0.5 max-w-[150px] truncate" title={tx.company_name}>
+                                                    {tx.company_name}
+                                                </div>
+                                            )}
                                             <div className="text-xs text-gray-500">
-                                                {new Date(tx.date).toLocaleString(undefined, {
+                                                {new Date(tx.date + 'Z').toLocaleString(undefined, {
                                                     month: 'short', day: 'numeric',
                                                     hour: 'numeric', minute: 'numeric'
                                                 })}
@@ -359,13 +364,13 @@ const LivePortfolio = () => {
                                     {adminLogs.cycleLogs && adminLogs.cycleLogs.length > 0 ? (
                                         <div className="space-y-2 mb-6">
                                             {adminLogs.cycleLogs.map((entry: any, idx: number) => (
-                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
-                                                    <div className="text-aquamarine-500 mb-1 border-b border-gray-700/50 pb-1 flex justify-between">
-                                                        <span>{entry.cycle_type}</span>
-                                                        <span className="text-gray-500">{new Date(entry.ran_at).toLocaleString()}</span>
-                                                    </div>
-                                                    <div className="text-gray-300">{entry.summary}</div>
-                                                </div>
+                                                <details key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed group">
+                                                    <summary className="text-aquamarine-500 border-b border-gray-700/50 pb-1 flex justify-between cursor-pointer list-none appearance-none outline-none">
+                                                        <span>{entry.cycle_type} <span className="text-gray-400 group-open:hidden ml-1">▼</span><span className="text-gray-400 hidden group-open:inline ml-1">▲</span></span>
+                                                        <span className="text-gray-500 text-right">{new Date(entry.ran_at + 'Z').toLocaleString()}</span>
+                                                    </summary>
+                                                    <div className="text-gray-300 mt-2">{entry.summary}</div>
+                                                </details>
                                             ))}
                                         </div>
                                     ) : (
@@ -392,7 +397,7 @@ const LivePortfolio = () => {
                                                                 <span>${Number(tx.total_amount).toLocaleString()}</span>
                                                             </div>
                                                             <div className="mt-1 text-[10px] text-gray-500">
-                                                                {new Date(tx.date).toLocaleString()}
+                                                                {new Date(tx.date + 'Z').toLocaleString()}
                                                                 {tx.notes && ` · ${tx.notes}`}
                                                             </div>
                                                         </div>
@@ -406,24 +411,29 @@ const LivePortfolio = () => {
                                                 <p className="text-gray-500 text-xs italic">No analysis data available.</p>
                                             ) : (
                                                 <div className="space-y-2">
-                                                    {adminLogs.analysis.filter((row: any) => row.ticker !== '_cycle').map((row: any, idx: number) => (
-                                                        <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
-                                                            <div className="flex justify-between items-center mb-1">
-                                                                <span className="font-bold">{row.ticker}</span>
-                                                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${row.action === 'BUY' ? 'bg-green-500/20 text-green-400' : row.action === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-300'
-                                                                    }`}>{row.action} {row.confidence != null ? `(${row.confidence}%)` : ''}</span>
+                                                    {adminLogs.analysis.filter((row: any) => row.ticker !== '_cycle').map((row: any, idx: number) => {
+                                                        const isHolding = data.holdings.some(h => h.ticker === row.ticker);
+                                                        const displayAction = row.action === 'HOLD' && !isHolding ? 'MONITOR' : row.action;
+
+                                                        return (
+                                                            <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
+                                                                <div className="flex justify-between items-center mb-1">
+                                                                    <span className="font-bold">{row.ticker}</span>
+                                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${row.action === 'BUY' ? 'bg-green-500/20 text-green-400' : row.action === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-300'
+                                                                        }`}>{displayAction} {row.confidence != null ? `(${row.confidence}%)` : ''}</span>
+                                                                </div>
+                                                                <div className="text-[11px] text-gray-400 mb-1">{row.reason}</div>
+                                                                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
+                                                                    {row.rsi != null && <span>RSI: {row.rsi.toFixed(1)}</span>}
+                                                                    {row.macd_histogram != null && <span>MACD hist: {row.macd_histogram.toFixed(3)}</span>}
+                                                                    {row.volume_ratio != null && <span>Vol×: {row.volume_ratio.toFixed(2)}</span>}
+                                                                    {row.price_change_pct != null && <span>Δ20d: {row.price_change_pct.toFixed(1)}%</span>}
+                                                                    {row.sma50 != null && row.sma200 != null && <span>SMA50/SMA200: {row.sma50.toFixed(2)}/{row.sma200.toFixed(2)}</span>}
+                                                                </div>
+                                                                <div className="mt-1 text-[10px] text-gray-500">{row.analyzed_at && new Date(row.analyzed_at + 'Z').toLocaleString()}</div>
                                                             </div>
-                                                            <div className="text-[11px] text-gray-400 mb-1">{row.reason}</div>
-                                                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
-                                                                {row.rsi != null && <span>RSI: {row.rsi.toFixed(1)}</span>}
-                                                                {row.macd_histogram != null && <span>MACD hist: {row.macd_histogram.toFixed(3)}</span>}
-                                                                {row.volume_ratio != null && <span>Vol×: {row.volume_ratio.toFixed(2)}</span>}
-                                                                {row.price_change_pct != null && <span>Δ20d: {row.price_change_pct.toFixed(1)}%</span>}
-                                                                {row.sma50 != null && row.sma200 != null && <span>SMA50/SMA200: {row.sma50.toFixed(2)}/{row.sma200.toFixed(2)}</span>}
-                                                            </div>
-                                                            <div className="mt-1 text-[10px] text-gray-500">{row.analyzed_at && new Date(row.analyzed_at).toLocaleString()}</div>
-                                                        </div>
-                                                    ))}
+                                                        )
+                                                    })}
                                                 </div>
 
                                             )}

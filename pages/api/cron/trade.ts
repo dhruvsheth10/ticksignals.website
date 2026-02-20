@@ -36,18 +36,6 @@ export default async function handler(
         }
 
         if (type === 'OPEN' || type === 'MID' || type === 'CLOSE' || type === 'PORTFOLIO_CHECK') {
-            // Hourly (MID) and OPEN: refresh screener cache so getBuyCandidates has fresh data and screener page is up to date
-            if (type === 'MID' || type === 'OPEN') {
-                const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000';
-                const secret = process.env.CRON_SECRET;
-                if (secret) {
-                    try {
-                        await fetch(`${base}/api/screener?force=true&key=${encodeURIComponent(secret)}`, { method: 'GET' });
-                    } catch (e) {
-                        console.warn('[Cron] Screener refresh failed:', (e as Error).message);
-                    }
-                }
-            }
             await runTradingCycle(type as 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLIO_CHECK');
             res.status(200).json({ status: 'Success', type });
         } else {

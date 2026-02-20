@@ -527,3 +527,25 @@ export async function cleanupIntradayForSoldToday(): Promise<number> {
     await db.execute({ sql: 'DELETE FROM sold_today', args: [] });
     return total;
 }
+
+// ── Cleanup logs older than 24 hours ──
+export async function cleanupOldLogs(): Promise<{ cycles: number; analysis: number }> {
+    const db = getTurso();
+    const cutoff = new Date();
+    cutoff.setHours(cutoff.getHours() - 24);
+    const cutoffStr = cutoff.toISOString();
+
+    const r1 = await db.execute({
+        sql: 'DELETE FROM trading_cycle_log WHERE ran_at < ?',
+        args: [cutoffStr],
+    });
+    const r2 = await db.execute({
+        sql: 'DELETE FROM trading_analysis_results WHERE analyzed_at < ?',
+        args: [cutoffStr],
+    });
+
+    return {
+        cycles: r1.rowsAffected,
+        analysis: r2.rowsAffected
+    };
+}

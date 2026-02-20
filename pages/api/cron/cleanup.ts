@@ -4,7 +4,7 @@
  * - Delete intraday_holdings for tickers sold today
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { cleanupOldDailySnapshots, cleanupIntradayForSoldToday } from '../../../lib/portfolio-db';
+import { cleanupOldDailySnapshots, cleanupIntradayForSoldToday, cleanupOldLogs } from '../../../lib/portfolio-db';
 
 /**
  * Check if we're past 4 PM ET (21:00 UTC) — safe to run cleanup
@@ -35,15 +35,17 @@ export default async function handler(
     }
 
     try {
-        const [snapshotsDeleted, intradayDeleted] = await Promise.all([
+        const [snapshotsDeleted, intradayDeleted, logsDeleted] = await Promise.all([
             cleanupOldDailySnapshots(),
             cleanupIntradayForSoldToday(),
+            cleanupOldLogs()
         ]);
         res.status(200).json({
             status: 'Success',
             snapshotsDeleted,
             intradayDeleted,
-            message: `Removed ${snapshotsDeleted} old snapshots, ${intradayDeleted} intraday bars for sold tickers`,
+            logsDeleted,
+            message: `Removed ${snapshotsDeleted} old snapshots, ${intradayDeleted} intraday bars for sold tickers, ${logsDeleted.analysis} old analysis logs, ${logsDeleted.cycles} cycle logs`,
         });
     } catch (e: any) {
         console.error('[Cron Cleanup]', e);

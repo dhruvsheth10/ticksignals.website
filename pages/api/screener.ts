@@ -368,7 +368,7 @@ export default async function handler(
 
 
 
-            // ── Phase 4: Update Monitored Prospects (Top 20 Fundamental Picks) ──
+            // ── Phase 4: Update Monitored Prospects (Top 35 Fundamental Picks) ──
             try {
                 const db = getPool();
                 const candidates = await db.query(`
@@ -377,7 +377,7 @@ export default async function handler(
                     FROM screener_cache
                     WHERE roe_pct > 12 AND gross_margin_pct > 8 AND debt_to_equity < 1.0 AND market_cap > 1000000000
                     ORDER BY pe_ratio ASC, roe_pct DESC
-                    LIMIT 20
+                    LIMIT 35
                 `);
 
                 const prospects = candidates.rows.map((r: any) => ({
@@ -386,6 +386,16 @@ export default async function handler(
                 }));
 
                 await updateMonitoredProspects(prospects);
+
+                try {
+                    const { saveCycleLog } = require('../../lib/portfolio-db');
+                    const header = `Global scan completed.\nUpdated monitored prospects list (Count: ${prospects.length}):\n`;
+                    const listSummary = prospects.map((p: any) => `${p.ticker} (Score: ${Number(p.score).toFixed(2)})`).join('\n');
+                    await saveCycleLog('PROSPECTS_UPDATE', header + listSummary);
+                } catch (logErr: any) {
+                    console.error('[Screener] Failed to save cycle log:', logErr.message);
+                }
+
                 console.log(`[Screener] Updated monitored prospects: ${prospects.length} tickers`);
             } catch (e: any) {
                 console.error('[Screener] Failed to update prospects:', e.message);

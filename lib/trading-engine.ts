@@ -266,17 +266,11 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 async function getBuyCandidates(): Promise<TradeSignal[]> {
     const db = getPool();
 
-    // 1. Fundamental Filter (slightly relaxed for more opportunities)
+    // 1. Fetch exactly the 20 Monitored Prospects (updated a few times a day by global scan)
     const query = `
-    SELECT ticker, sector, price 
-    FROM screener_cache 
-    WHERE 
-      roe_pct > 12  -- Lowered from 15
-      AND gross_margin_pct > 8  -- Lowered from 10
-      AND debt_to_equity < 1.0  -- Relaxed from 0.8
-      AND market_cap > 1000000000  -- Lowered from 2B to include more mid-caps
-    ORDER BY pe_ratio ASC, roe_pct DESC
-    LIMIT 75  -- Increased from 50
+    SELECT ticker 
+    FROM monitored_prospects 
+    ORDER BY score DESC
   `;
 
     const result = await db.query(query);

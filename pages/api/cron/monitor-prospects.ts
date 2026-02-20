@@ -40,7 +40,7 @@ export default async function handler(
             return res.status(200).json({ message: 'No prospects to monitor' });
         }
 
-        const logs: string[] = [`Checking ${prospects.length} prospects...`];
+        const logs: string[] = [`Evaluated ${prospects.length} monitored prospects:`];
         const signals = [];
 
         for (const p of prospects) {
@@ -64,20 +64,21 @@ export default async function handler(
                     sma200: signal.indicators?.sma200
                 });
 
+                const displayAction = signal.action === 'HOLD' ? 'MONITORING' : signal.action;
+                const logMsg = `  ${p.ticker}: ${displayAction} ${signal.confidence > 0 ? `(${signal.confidence}%)` : ''} - ${signal.reason}`;
+                logs.push(logMsg);
+
                 if (signal.action !== 'HOLD' && signal.confidence > 60) {
-                    const logMsg = `${p.ticker}: ${signal.action} (${signal.confidence}%) - ${signal.reason}`;
-                    logs.push(logMsg);
                     signals.push(logMsg);
                 }
             } catch (err: any) {
                 console.error(`[Monitor] Error ${p.ticker}:`, err.message);
-                logs.push(`${p.ticker}: Error ${err.message}`);
+                logs.push(`  ${p.ticker}: Error ${err.message}`);
             }
         }
 
-        if (signals.length > 0) {
-            await saveCycleLog('MONITOR', logs.join('\n'));
-        }
+        // Always save a cycle log so the user can verify the scan happened
+        await saveCycleLog('MONITOR', logs.join('\n'));
 
         res.status(200).json({
             success: true,

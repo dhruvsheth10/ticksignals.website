@@ -1,23 +1,29 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getPortfolioStatus, getHoldings, getTransactions, getHistory, initPortfolioTables } from '../../lib/portfolio-db';
+import { getScreenerData } from '../../lib/db';
 
 export default async function handler(
     req: NextApiRequest,
     res: NextApiResponse
 ) {
     try {
-        // Lazy init - ensure tables exist on first load if not already
-        // Ideally this runs once at build/deploy, but safe to check here
         await initPortfolioTables();
 
-        // Parallel fetch for speed
-        const [status, holdings, transactions, history] = await Promise.all([
+        const [status, holdings, transactionsRaw, history, screenerData] = await Promise.all([
             getPortfolioStatus(),
             getHoldings(),
             getTransactions(50),
-            getHistory(30)
+            getHistory(30),
+            getScreenerData()
         ]);
+
+        const companyMap = new Map(screenerData.map(d => [d.ticker, d.company_name]));
+
+        const transactions = transactionsRaw.map(tx => ({
+            ...tx,
+            company_name: companyMap.get(tx.ticker) || null
+        }));
 
         res.status(200).json({
             status,
