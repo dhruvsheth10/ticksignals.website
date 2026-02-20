@@ -25,6 +25,7 @@ interface PortfolioData {
         shares: number;
         price: number;
         total_amount: number;
+        company_name?: string | null;
     }[];
     history: {
         date: string;
