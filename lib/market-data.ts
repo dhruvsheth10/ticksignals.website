@@ -1,4 +1,5 @@
 import https from 'https';
+import yahooFinance from 'yahoo-finance2';
 
 // API Keys - In a real prod environment these should be in .env,
 // but for this specific request we are embedding them as fallbacks/defaults.
@@ -262,7 +263,18 @@ export class MarketDataService {
      * Used for Portfolio Valuation and Trade Execution
      */
     static async getCurrentPrice(ticker: string): Promise<number | null> {
-        // 1. Try Finnhub Quote
+        // 1. Give Yahoo Finance priority for simple spot prices (No Rate Limits)
+        try {
+            const quote = await yahooFinance.quote(ticker);
+            const price = (quote as any)?.regularMarketPrice;
+            if (price && price > 0) {
+                return price;
+            }
+        } catch (e) {
+            console.warn(`[MarketData] Yahoo Finance quote failed for ${ticker}`, e);
+        }
+
+        // 2. Try Finnhub Quote (Backup)
         try {
             // Rate limit check
             const now = Date.now();
@@ -278,7 +290,7 @@ export class MarketDataService {
             console.warn(`[MarketData] Finnhub quote failed for ${ticker}`, e);
         }
 
-        // 2. Try Alpha Vantage Global Quote (Backup)
+        // 3. Try Alpha Vantage Global Quote (Backup)
         try {
             const allowed = STATE.avUsed < LIMITS.AV_DAILY;
             if (allowed) {
