@@ -84,67 +84,65 @@ export default async function handler(
           companyName: dbData.company_name ?? null
         };
       } else {
-        // Fallback: Ticker not in the scanner! Fetch from authentic Yahoo API snippet
-        console.log(`[Analyzer] Ticker ${upperTicker} not in DB cache, fetching from Yahoo API directly...`);
-        const yData = await getQuoteSummary(upperTicker);
-        if (yData) {
-          fundamentalsData = {
-            returnOnEquity: yData.returnOnEquity !== null ? yData.returnOnEquity * 100 : null,
-            returnOnAssets: yData.returnOnAssets !== null ? yData.returnOnAssets * 100 : null,
-            debtToEquity: yData.debtToEquity,
-            grossMargins: yData.grossMargins !== null ? yData.grossMargins * 100 : null,
-            totalRevenue: yData.totalRevenue,
-            fullTimeEmployees: yData.fullTimeEmployees,
-            sector: yData.sector,
-            industry: yData.industry,
-            dividendYield: yData.dividendYield !== null ? yData.dividendYield * 100 : null,
-            beta: yData.beta,
-            trailingPE: yData.trailingPE,
-            marketCap: yData.marketCap,
-            fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
-            fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
-            companyName: meta.longName || meta.shortName || upperTicker,
-          };
+        // Fallback: Ticker not in the scanner! Instead of querying Yahoo Fundamentals (which gets rate limited on Vercel IPs), we grab what we have from the chart meta, insert into CSV/DB, and let the Oracle cron job fully populate it later.
+        console.log(`[Analyzer] Ticker ${upperTicker} not in DB cache, adding basic info to DB/CSV and letting Cron populate...`);
 
-          // 1. ADD IT TO THE CACHED DATABASE IMMEDIATELY
-          await upsertScreenerRow({
-            ticker: upperTicker,
-            price: meta.regularMarketPrice ?? yData.regularMarketPrice ?? null,
-            market_cap: yData.marketCap ?? null,
-            pe_ratio: yData.trailingPE ?? null,
-            roe_pct: yData.returnOnEquity !== null ? yData.returnOnEquity * 100 : null,
-            debt_to_equity: yData.debtToEquity ?? null,
-            gross_margin_pct: yData.grossMargins !== null ? yData.grossMargins * 100 : null,
-            dividend_yield_pct: yData.dividendYield !== null ? yData.dividendYield * 100 : null,
-            roa_pct: yData.returnOnAssets !== null ? yData.returnOnAssets * 100 : null,
-            total_revenue: yData.totalRevenue ?? null,
-            revenue_per_employee: (yData.totalRevenue && yData.fullTimeEmployees) ? yData.totalRevenue / yData.fullTimeEmployees : null,
-            sector: yData.sector || null,
-            industry: yData.industry || null,
-            company_name: meta.longName || meta.shortName || upperTicker,
-            fifty_two_week_high: meta.fiftyTwoWeekHigh ?? null,
-            fifty_two_week_low: meta.fiftyTwoWeekLow ?? null,
-            beta: yData.beta ?? null,
-          });
+        fundamentalsData = {
+          returnOnEquity: null,
+          returnOnAssets: null,
+          debtToEquity: null,
+          grossMargins: null,
+          totalRevenue: null,
+          fullTimeEmployees: null,
+          sector: null,
+          industry: null,
+          dividendYield: null,
+          beta: null,
+          trailingPE: null,
+          marketCap: meta.marketCap ?? null,
+          fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? null,
+          fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? null,
+          companyName: meta.longName || meta.shortName || upperTicker,
+        };
 
-          // 2. APPEND IT TO VANGUARD.CSV SO THE CRON JOB SCANNER INCLUDES IT FOREVER
-          try {
-            const csvPath = path.join(process.cwd(), 'python-service', 'vanguard.csv');
-            let content = '';
-            if (fs.existsSync(csvPath)) {
-              content = fs.readFileSync(csvPath, 'utf-8');
-            }
-            const existTickers = content.split(/\r?\n/).map((line: string) => line.trim());
+        // 1. ADD IT TO THE CACHED DATABASE IMMEDIATELY (with basic chart-derived info)
+        await upsertScreenerRow({
+          ticker: upperTicker,
+          price: meta.regularMarketPrice ?? null,
+          market_cap: meta.marketCap ?? null,
+          pe_ratio: null,
+          roe_pct: null,
+          debt_to_equity: null,
+          gross_margin_pct: null,
+          dividend_yield_pct: null,
+          roa_pct: null,
+          total_revenue: null,
+          revenue_per_employee: null,
+          sector: null,
+          industry: null,
+          company_name: meta.longName || meta.shortName || upperTicker,
+          fifty_two_week_high: meta.fiftyTwoWeekHigh ?? null,
+          fifty_two_week_low: meta.fiftyTwoWeekLow ?? null,
+          beta: null,
+        });
 
-            if (!existTickers.includes(upperTicker)) {
-              // Make sure there is a newline if file doesn't end with one
-              const newLinePrefix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-              fs.appendFileSync(csvPath, `${newLinePrefix}${upperTicker}\n`);
-              console.log(`[Analyzer] Appended new ticker ${upperTicker} to vanguard.csv for continuous tracking.`);
-            }
-          } catch (fsErr: any) {
-            console.error('[Analyzer] Failed to add ticker to csv file:', fsErr.message);
+        // 2. APPEND IT TO VANGUARD.CSV SO THE CRON JOB SCANNER INCLUDES IT FOREVER
+        try {
+          const csvPath = path.join(process.cwd(), 'python-service', 'vanguard.csv');
+          let content = '';
+          if (fs.existsSync(csvPath)) {
+            content = fs.readFileSync(csvPath, 'utf-8');
           }
+          const existTickers = content.split(/\r?\n/).map((line: string) => line.trim());
+
+          if (!existTickers.includes(upperTicker)) {
+            // Make sure there is a newline if file doesn't end with one
+            const newLinePrefix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+            fs.appendFileSync(csvPath, `${newLinePrefix}${upperTicker}\n`);
+            console.log(`[Analyzer] Appended new ticker ${upperTicker} to vanguard.csv for continuous tracking.`);
+          }
+        } catch (fsErr: any) {
+          console.error('[Analyzer] Failed to add ticker to csv file:', fsErr.message);
         }
       }
     } catch (e: any) {
