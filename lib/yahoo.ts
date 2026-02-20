@@ -234,12 +234,15 @@ export interface YahooFundamentals {
     industry: string | null;
     dividendYield: number | null;
     beta: number | null;
+    trailingPE: number | null;
+    marketCap: number | null;
+    regularMarketPrice: number | null;
 }
 
 export async function getQuoteSummary(ticker: string): Promise<YahooFundamentals | null> {
     try {
         const data = await yahooFetch(
-            `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData,summaryDetail,assetProfile`
+            `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData,summaryDetail,assetProfile,defaultKeyStatistics,price`
         );
 
         const result = data.quoteSummary?.result?.[0];
@@ -248,6 +251,8 @@ export async function getQuoteSummary(ticker: string): Promise<YahooFundamentals
         const fin = result.financialData || {};
         const det = result.summaryDetail || {};
         const prof = result.assetProfile || {};
+        const stats = result.defaultKeyStatistics || {};
+        const pr = result.price || {};
 
         return {
             returnOnEquity: fin.returnOnEquity?.raw ?? null,
@@ -260,6 +265,9 @@ export async function getQuoteSummary(ticker: string): Promise<YahooFundamentals
             industry: prof.industry || null,
             dividendYield: det.dividendYield?.raw ?? null,
             beta: det.beta?.raw ?? null,
+            trailingPE: det.trailingPE?.raw ?? stats.trailingPE?.raw ?? null,
+            marketCap: pr.marketCap?.raw ?? null,
+            regularMarketPrice: pr.regularMarketPrice?.raw ?? null,
         };
     } catch (err) {
         console.error(`[Yahoo] Failed to get summary for ${ticker}:`, (err as Error).message);

@@ -1,5 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getScreenerTicker } from '../../lib/db';
+import fs from 'fs';
+import path from 'path';
+import { getScreenerTicker, upsertScreenerRow } from '../../lib/db';
+import { getQuoteSummary } from '../../lib/yahoo';
 
 export default async function handler(
   req: NextApiRequest,
@@ -80,8 +83,72 @@ export default async function handler(
           fiftyTwoWeekLow: dbData.fifty_two_week_low != null ? Number(dbData.fifty_two_week_low) : null,
           companyName: dbData.company_name ?? null
         };
+      } else {
+        // Fallback: Ticker not in the scanner! Fetch from authentic Yahoo API snippet
+        console.log(`[Analyzer] Ticker ${upperTicker} not in DB cache, fetching from Yahoo API directly...`);
+        const yData = await getQuoteSummary(upperTicker);
+        if (yData) {
+          fundamentalsData = {
+            returnOnEquity: yData.returnOnEquity !== null ? yData.returnOnEquity * 100 : null,
+            returnOnAssets: yData.returnOnAssets !== null ? yData.returnOnAssets * 100 : null,
+            debtToEquity: yData.debtToEquity,
+            grossMargins: yData.grossMargins !== null ? yData.grossMargins * 100 : null,
+            totalRevenue: yData.totalRevenue,
+            fullTimeEmployees: yData.fullTimeEmployees,
+            sector: yData.sector,
+            industry: yData.industry,
+            dividendYield: yData.dividendYield !== null ? yData.dividendYield * 100 : null,
+            beta: yData.beta,
+            trailingPE: yData.trailingPE,
+            marketCap: yData.marketCap,
+            fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh,
+            fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
+            companyName: meta.longName || meta.shortName || upperTicker,
+          };
+
+          // 1. ADD IT TO THE CACHED DATABASE IMMEDIATELY
+          await upsertScreenerRow({
+            ticker: upperTicker,
+            price: meta.regularMarketPrice ?? yData.regularMarketPrice ?? null,
+            market_cap: yData.marketCap ?? null,
+            pe_ratio: yData.trailingPE ?? null,
+            roe_pct: yData.returnOnEquity !== null ? yData.returnOnEquity * 100 : null,
+            debt_to_equity: yData.debtToEquity ?? null,
+            gross_margin_pct: yData.grossMargins !== null ? yData.grossMargins * 100 : null,
+            dividend_yield_pct: yData.dividendYield !== null ? yData.dividendYield * 100 : null,
+            roa_pct: yData.returnOnAssets !== null ? yData.returnOnAssets * 100 : null,
+            total_revenue: yData.totalRevenue ?? null,
+            revenue_per_employee: (yData.totalRevenue && yData.fullTimeEmployees) ? yData.totalRevenue / yData.fullTimeEmployees : null,
+            sector: yData.sector || null,
+            industry: yData.industry || null,
+            company_name: meta.longName || meta.shortName || upperTicker,
+            fifty_two_week_high: meta.fiftyTwoWeekHigh ?? null,
+            fifty_two_week_low: meta.fiftyTwoWeekLow ?? null,
+            beta: yData.beta ?? null,
+          });
+
+          // 2. APPEND IT TO VANGUARD.CSV SO THE CRON JOB SCANNER INCLUDES IT FOREVER
+          try {
+            const csvPath = path.join(process.cwd(), 'python-service', 'vanguard.csv');
+            let content = '';
+            if (fs.existsSync(csvPath)) {
+              content = fs.readFileSync(csvPath, 'utf-8');
+            }
+            const existTickers = content.split(/\r?\n/).map((line: string) => line.trim());
+
+            if (!existTickers.includes(upperTicker)) {
+              // Make sure there is a newline if file doesn't end with one
+              const newLinePrefix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+              fs.appendFileSync(csvPath, `${newLinePrefix}${upperTicker}\n`);
+              console.log(`[Analyzer] Appended new ticker ${upperTicker} to vanguard.csv for continuous tracking.`);
+            }
+          } catch (fsErr: any) {
+            console.error('[Analyzer] Failed to add ticker to csv file:', fsErr.message);
+          }
+        }
       }
-    } catch (_) {
+    } catch (e: any) {
+      console.warn('[Analyzer] Fundamentals fetch failed:', e.message);
       // Fundamentals are optional — silently ignore
     }
 
