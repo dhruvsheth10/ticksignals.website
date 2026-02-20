@@ -221,12 +221,21 @@ export default async function handler(
                 }
             }
 
-            const allTickers = TICKER_LIST;
-            if (!allTickers.length) {
-                return res.status(500).json({ error: 'No tickers loaded from CSV' });
+            let allTickers = TICKER_LIST;
+            // Also grab any temporary tickers that the user analyzed via the Analyzer UI
+            try {
+                const existingInDb = await getScreenerData();
+                const dbTickers = existingInDb.map((row: any) => row.ticker);
+                allTickers = [...new Set([...allTickers, ...dbTickers])].sort();
+            } catch (err) {
+                console.warn('[Screener] Failed to fetch existing database tickers to merge.', err);
             }
 
-            console.log(`[Screener] ${allTickers.length} tickers`);
+            if (!allTickers.length) {
+                return res.status(500).json({ error: 'No tickers loaded from CSV or DB' });
+            }
+
+            console.log(`[Screener] ${allTickers.length} tickers to scan`);
 
             // Establish Yahoo session (cookie + crumb) ONCE
             const session = await getYahooSession();

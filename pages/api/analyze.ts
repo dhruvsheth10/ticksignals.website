@@ -126,24 +126,7 @@ export default async function handler(
           beta: null,
         });
 
-        // 2. APPEND IT TO VANGUARD.CSV SO THE CRON JOB SCANNER INCLUDES IT FOREVER
-        try {
-          const csvPath = path.join(process.cwd(), 'python-service', 'vanguard.csv');
-          let content = '';
-          if (fs.existsSync(csvPath)) {
-            content = fs.readFileSync(csvPath, 'utf-8');
-          }
-          const existTickers = content.split(/\r?\n/).map((line: string) => line.trim());
-
-          if (!existTickers.includes(upperTicker)) {
-            // Make sure there is a newline if file doesn't end with one
-            const newLinePrefix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
-            fs.appendFileSync(csvPath, `${newLinePrefix}${upperTicker}\n`);
-            console.log(`[Analyzer] Appended new ticker ${upperTicker} to vanguard.csv for continuous tracking.`);
-          }
-        } catch (fsErr: any) {
-          console.error('[Analyzer] Failed to add ticker to csv file:', fsErr.message);
-        }
+        console.log(`[Analyzer] Added temporary ticker ${upperTicker} to database. Scanner will populate on next run.`);
       }
     } catch (e: any) {
       console.warn('[Analyzer] Fundamentals fetch failed:', e.message);
