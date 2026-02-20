@@ -33,6 +33,8 @@ interface PortfolioData {
     }[];
 }
 
+const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T') ? d + 'Z' : d.replace(' ', 'T') + 'Z'));
+
 const LivePortfolio = () => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
@@ -255,7 +257,7 @@ const LivePortfolio = () => {
                                                 </div>
                                             )}
                                             <div className="text-xs text-gray-500">
-                                                {new Date(tx.date + 'Z').toLocaleString(undefined, {
+                                                {parseDate(tx.date).toLocaleString(undefined, {
                                                     month: 'short', day: 'numeric',
                                                     hour: 'numeric', minute: 'numeric'
                                                 })}
@@ -368,7 +370,7 @@ const LivePortfolio = () => {
                                                 <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
                                                     <div className="text-aquamarine-500 mb-1 border-b border-gray-700/50 pb-1 flex justify-between">
                                                         <span>{entry.cycle_type}</span>
-                                                        <span className="text-gray-500">{new Date(entry.ran_at + 'Z').toLocaleString()}</span>
+                                                        <span className="text-gray-500">{parseDate(entry.ran_at).toLocaleString()}</span>
                                                     </div>
                                                     <div className="text-gray-300 mt-2">{entry.summary}</div>
                                                 </div>
@@ -378,12 +380,12 @@ const LivePortfolio = () => {
                                                 <details className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed group mt-4">
                                                     <summary className="text-aquamarine-500 border-b border-gray-700/50 pb-1 flex justify-between cursor-pointer list-none appearance-none outline-none font-bold">
                                                         <span>1 Min Portfolio Checks ({adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK').length}) <span className="text-gray-400 group-open:hidden ml-1">▼</span><span className="text-gray-400 hidden group-open:inline ml-1">▲</span></span>
-                                                        <span className="text-gray-500 text-right">Latest: {new Date(adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK')[0].ran_at + 'Z').toLocaleString()}</span>
+                                                        <span className="text-gray-500 text-right">Latest: {parseDate(adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK')[0].ran_at).toLocaleString()}</span>
                                                     </summary>
                                                     <div className="mt-3 space-y-3 max-h-[300px] overflow-y-auto custom-scrollbar">
                                                         {adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK').map((entry: any, idx: number) => (
                                                             <div key={idx} className="border-l-2 border-gray-600 pl-2">
-                                                                <div className="text-gray-500 mb-1">{new Date(entry.ran_at + 'Z').toLocaleString()}</div>
+                                                                <div className="text-gray-500 mb-1">{parseDate(entry.ran_at).toLocaleString()}</div>
                                                                 <div className="text-gray-400">{entry.summary}</div>
                                                             </div>
                                                         ))}
@@ -415,7 +417,7 @@ const LivePortfolio = () => {
                                                                 <span>${Number(tx.total_amount).toLocaleString()}</span>
                                                             </div>
                                                             <div className="mt-1 text-[10px] text-gray-500">
-                                                                {new Date(tx.date + 'Z').toLocaleString()}
+                                                                {parseDate(tx.date).toLocaleString()}
                                                                 {tx.notes && ` · ${tx.notes}`}
                                                             </div>
                                                         </div>
@@ -448,7 +450,7 @@ const LivePortfolio = () => {
                                                                     {row.price_change_pct != null && <span>Δ20d: {row.price_change_pct.toFixed(1)}%</span>}
                                                                     {row.sma50 != null && row.sma200 != null && <span>SMA50/SMA200: {row.sma50.toFixed(2)}/{row.sma200.toFixed(2)}</span>}
                                                                 </div>
-                                                                <div className="mt-1 text-[10px] text-gray-500">{row.analyzed_at && new Date(row.analyzed_at + 'Z').toLocaleString()}</div>
+                                                                <div className="mt-1 text-[10px] text-gray-500">{row.analyzed_at && parseDate(row.analyzed_at).toLocaleString()}</div>
                                                             </div>
                                                         )
                                                     })}

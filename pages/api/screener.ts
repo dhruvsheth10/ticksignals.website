@@ -384,7 +384,7 @@ export default async function handler(
                     SELECT ticker, 
                            (roe_pct + gross_margin_pct) as score 
                     FROM screener_cache
-                    WHERE roe_pct > 12 AND gross_margin_pct > 8 AND debt_to_equity < 1.0 AND market_cap > 1000000000
+                    WHERE roe_pct > 12 AND gross_margin_pct > 8 AND debt_to_equity < 100 AND market_cap > 1000000000
                     ORDER BY pe_ratio ASC, roe_pct DESC
                     LIMIT 35
                 `);

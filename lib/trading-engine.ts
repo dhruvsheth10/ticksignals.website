@@ -1,6 +1,6 @@
 
 import { getPool } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars } from './portfolio-db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice } from './portfolio-db';
 import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
 
@@ -75,6 +75,8 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             const price = await MarketDataService.getCurrentPrice(holding.ticker);
             if (price) {
                 totalEquity += price * holding.shares;
+                // Keep the UI fast by making sure DB has the live price
+                await updateHoldingPrice(holding.ticker, price).catch(() => { });
 
                 // Stop Loss / Take Profit (MID, CLOSE, or any PORTFOLIO_CHECK)
                 if (type === 'MID' || type === 'CLOSE' || isPortfolioOnly) {

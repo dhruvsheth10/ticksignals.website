@@ -227,19 +227,33 @@ export async function updatePortfolioStatus(cash: number, equity: number): Promi
     });
 }
 
+export async function updateHoldingPrice(ticker: string, current_price: number): Promise<void> {
+    const db = getTurso();
+    await db.execute({
+        sql: `UPDATE portfolio_holdings SET current_price = ?, market_value = shares * ?, last_updated = datetime('now')
+              WHERE ticker = ?`,
+        args: [current_price, current_price, ticker],
+    });
+}
+
 export async function getHoldings(): Promise<PortfolioHolding[]> {
     const db = getTurso();
     const r = await db.execute({ sql: 'SELECT * FROM portfolio_holdings ORDER BY market_value DESC', args: [] });
-    return (r.rows as any[]).map(row => ({
-        ticker: row.ticker,
-        shares: row.shares,
-        avg_cost: row.avg_cost,
-        current_price: row.current_price,
-        market_value: row.market_value,
-        return_pct: row.return_pct ?? 0,
-        last_updated: row.last_updated || '',
-        opened_at: row.opened_at || '',
-    }));
+    return (r.rows as any[]).map(row => {
+        const avg_cost = row.avg_cost;
+        const current_price = row.current_price;
+        const return_pct = avg_cost > 0 ? ((current_price - avg_cost) / avg_cost) * 100 : 0;
+        return {
+            ticker: row.ticker,
+            shares: row.shares,
+            avg_cost: row.avg_cost,
+            current_price: row.current_price,
+            market_value: row.market_value,
+            return_pct: return_pct,
+            last_updated: row.last_updated || '',
+            opened_at: row.opened_at || '',
+        };
+    });
 }
 
 export async function getTransactions(limit = 50): Promise<PortfolioTransaction[]> {
