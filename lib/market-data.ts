@@ -306,4 +306,49 @@ export class MarketDataService {
 
         return null;
     }
+
+    // --- MASSIVE.COM (POLYGON) FINANCIALS ---
+    // Strict 5 RPM limit on free tier, use sparingly.
+    static async getDeepFinancials(ticker: string): Promise<any> {
+        const apiKey = process.env.MASSIVE_API_KEY || '7Qxy0hwMkHzPz0DDoPgVfDaa8GarQRlx';
+        const url = `https://api.massive.com/vX/reference/financials?ticker=${ticker}&limit=1&apiKey=${apiKey}`;
+        try {
+            const data = await httpsGet(url);
+            if (data && data.results && data.results.length > 0) {
+                return data.results[0];
+            }
+        } catch (e) {
+            console.error(`[MarketData] Massive API error for ${ticker}:`, e);
+        }
+        return null;
+    }
+
+    // --- FRED MACRO ECONOMIC INDICATOR ---
+    static async getMacroTrend(): Promise<{ safeToTrade: boolean; reason: string }> {
+        const fredKey = process.env.FRED_API_KEY;
+        if (!fredKey) {
+            // Default pass if user hasn't supplied FRED yet.
+            return { safeToTrade: true, reason: 'FRED API Key absent - assuming Macro OK' };
+        }
+
+        try {
+            // VIX is the global fear index.
+            // A VIX over 30 generally means "extreme fear/panic selling"
+            const url = `https://api.stlouisfed.org/fred/series/observations?series_id=VIXCLS&sort_order=desc&limit=1&api_key=${fredKey}&file_type=json`;
+            const data = await httpsGet(url);
+            if (data && data.observations && data.observations.length > 0) {
+                const latestVix = parseFloat(data.observations[0].value);
+                if (latestVix >= 35) {
+                    return { safeToTrade: false, reason: `VIX extremely high (${latestVix}). Market in severe panic.` };
+                }
+                if (latestVix > 25) {
+                    return { safeToTrade: true, reason: `VIX elevated (${latestVix}). Expect high volatility.` };
+                }
+                return { safeToTrade: true, reason: `VIX Normal (${latestVix})` };
+            }
+        } catch (e) {
+            console.error('[MarketData] FRED API error:', e);
+        }
+        return { safeToTrade: true, reason: 'FRED fallback - OK' };
+    }
 }

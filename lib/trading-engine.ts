@@ -426,9 +426,40 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
             }
 
             if (buyConfidence >= 68) { // Lower threshold for more opportunities
+
+                // --- 8. FRED Macro Economic Check ---
+                // We only do this check when ready to buy to minimize API calls
+                const macro = await MarketDataService.getMacroTrend();
+                if (!macro.safeToTrade) {
+                    return {
+                        ticker,
+                        action: 'HOLD',
+                        reason: `Macro Block: ${macro.reason} (Setup was ${buyConfidence}%)`,
+                        confidence: 0
+                    };
+                }
+
+                // --- 9. Massive.com (FMP) Financials Deep Dive ---
+                // We only check if financials are safe after passing technicals & macro
+                const fins = await MarketDataService.getDeepFinancials(ticker);
+                if (fins && fins.financials && fins.financials.income_statement) {
+                    const netIncomeNode = fins.financials.income_statement.net_income_loss;
+                    const netIncome = netIncomeNode ? netIncomeNode.value : null;
+                    if (netIncome !== null && netIncome < 0) {
+                        buySignals.push('Warning: Negative Net Income');
+                        buyConfidence = Math.max(0, buyConfidence - 15); // penalize sharply
+                    } else if (netIncome !== null && netIncome > 0) {
+                        buySignals.push('Positive GAAP Income');
+                        buyConfidence += 5;
+                    }
+                }
+
+                // Final re-check of confidence after FMP 
+                const finalAction = buyConfidence >= 68 ? 'BUY' : 'HOLD';
+
                 return {
                     ticker,
-                    action: 'BUY',
+                    action: finalAction,
                     reason: buySignals.join(', '),
                     confidence: Math.min(95, buyConfidence),
                     sentimentBoost,

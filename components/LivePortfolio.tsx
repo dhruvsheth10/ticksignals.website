@@ -364,15 +364,32 @@ const LivePortfolio = () => {
 
                                     {adminLogs.cycleLogs && adminLogs.cycleLogs.length > 0 ? (
                                         <div className="space-y-2 mb-6">
-                                            {adminLogs.cycleLogs.map((entry: any, idx: number) => (
-                                                <details key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed group">
-                                                    <summary className="text-aquamarine-500 border-b border-gray-700/50 pb-1 flex justify-between cursor-pointer list-none appearance-none outline-none">
-                                                        <span>{entry.cycle_type} <span className="text-gray-400 group-open:hidden ml-1">▼</span><span className="text-gray-400 hidden group-open:inline ml-1">▲</span></span>
-                                                        <span className="text-gray-500 text-right">{new Date(entry.ran_at + 'Z').toLocaleString()}</span>
-                                                    </summary>
+                                            {adminLogs.cycleLogs.filter((l: any) => l.cycle_type !== 'PORTFOLIO_CHECK').map((entry: any, idx: number) => (
+                                                <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
+                                                    <div className="text-aquamarine-500 mb-1 border-b border-gray-700/50 pb-1 flex justify-between">
+                                                        <span>{entry.cycle_type}</span>
+                                                        <span className="text-gray-500">{new Date(entry.ran_at + 'Z').toLocaleString()}</span>
+                                                    </div>
                                                     <div className="text-gray-300 mt-2">{entry.summary}</div>
-                                                </details>
+                                                </div>
                                             ))}
+
+                                            {adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK').length > 0 && (
+                                                <details className="rounded-md border border-gray-700/60 bg-gray-800/70 p-3 whitespace-pre-wrap font-mono text-[10px] leading-relaxed group mt-4">
+                                                    <summary className="text-aquamarine-500 border-b border-gray-700/50 pb-1 flex justify-between cursor-pointer list-none appearance-none outline-none font-bold">
+                                                        <span>1 Min Portfolio Checks ({adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK').length}) <span className="text-gray-400 group-open:hidden ml-1">▼</span><span className="text-gray-400 hidden group-open:inline ml-1">▲</span></span>
+                                                        <span className="text-gray-500 text-right">Latest: {new Date(adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK')[0].ran_at + 'Z').toLocaleString()}</span>
+                                                    </summary>
+                                                    <div className="mt-3 space-y-3 max-h-[300px] overflow-y-auto custom-scrollbar">
+                                                        {adminLogs.cycleLogs.filter((l: any) => l.cycle_type === 'PORTFOLIO_CHECK').map((entry: any, idx: number) => (
+                                                            <div key={idx} className="border-l-2 border-gray-600 pl-2">
+                                                                <div className="text-gray-500 mb-1">{new Date(entry.ran_at + 'Z').toLocaleString()}</div>
+                                                                <div className="text-gray-400">{entry.summary}</div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </details>
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="p-4 border border-dashed border-gray-700 rounded-lg text-center text-gray-500 mb-6">
