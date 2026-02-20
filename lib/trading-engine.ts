@@ -85,6 +85,11 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                     if (returnPct < -4) {
                         await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Hard Stop Loss (-4%) Hit (${returnPct.toFixed(1)}%)`);
                         summaryLines.push(`  SELL ${holding.ticker}: stop loss -4%`);
+                        const fresh = await getPortfolioStatus();
+                        await updatePortfolioStatus(
+                            fresh.cash_balance + (holding.shares * price),
+                            fresh.total_equity - (price * holding.shares)
+                        );
                         totalEquity -= price * holding.shares;
                         continue;
                     }
@@ -93,6 +98,11 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                     if (returnPct >= 6 && holding.shares > 0) {
                         await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Take Profit Target Hit (+6%+)`);
                         summaryLines.push(`  SELL ${holding.ticker}: take profit +6%`);
+                        const fresh = await getPortfolioStatus();
+                        await updatePortfolioStatus(
+                            fresh.cash_balance + (holding.shares * price),
+                            totalEquity - (price * holding.shares)
+                        );
                         totalEquity -= price * holding.shares;
                         continue;
                     }
@@ -103,6 +113,11 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                         if (signal.action === 'SELL' || signal.confidence < 40) {
                             await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Time Exit (>3 days red) + Weak Analysis`);
                             summaryLines.push(`  SELL ${holding.ticker}: time exit (>3d red) + weak analysis`);
+                            const fresh = await getPortfolioStatus();
+                            await updatePortfolioStatus(
+                                fresh.cash_balance + (holding.shares * price),
+                                fresh.total_equity - (price * holding.shares)
+                            );
                             totalEquity -= price * holding.shares;
                             continue;
                         }
@@ -152,7 +167,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                     const freshStatus = await getPortfolioStatus();
                     await updatePortfolioStatus(
                         freshStatus.cash_balance + (holding.shares * currentPrice),
-                        totalEquity - (holding.shares * currentPrice)
+                        freshStatus.total_equity - (holding.shares * currentPrice)
                     );
                 }
             } catch (e) { console.error(e); }
