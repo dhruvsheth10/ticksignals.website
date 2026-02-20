@@ -71,22 +71,47 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     const isPortfolioOnly = type === 'PORTFOLIO_CHECK';
 
     for (const holding of holdings) {
-        try {
-            const price = await MarketDataService.getCurrentPrice(holding.ticker);
-            if (price) {
-                totalEquity += price * holding.shares;
-                // Keep the UI fast by making sure DB has the live price
-                await updateHoldingPrice(holding.ticker, price).catch(() => { });
+        const price = holding.current_price;
+        if (price) {
+            totalEquity += price * holding.shares;
 
-                // Stop Loss / Take Profit (MID, CLOSE, or any PORTFOLIO_CHECK)
-                if (type === 'MID' || type === 'CLOSE' || isPortfolioOnly) {
-                    const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
-                    const daysHeld = holding.opened_at ? (Date.now() - new Date(holding.opened_at).getTime()) / (1000 * 60 * 60 * 24) : 0;
+            // Stop Loss / Take Profit (MID, CLOSE, or any PORTFOLIO_CHECK)
+            if (type === 'MID' || type === 'CLOSE' || isPortfolioOnly) {
+                const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
+                const daysHeld = holding.opened_at ? (Date.now() - new Date(holding.opened_at).getTime()) / (1000 * 60 * 60 * 24) : 0;
 
-                    // 1. Tighter Stop Loss (-4%)
-                    if (returnPct < -4) {
-                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Hard Stop Loss (-4%) Hit (${returnPct.toFixed(1)}%)`);
-                        summaryLines.push(`  SELL ${holding.ticker}: stop loss -4%`);
+                // 1. Tighter Stop Loss (-4%)
+                if (returnPct < -4) {
+                    await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Hard Stop Loss (-4%) Hit (${returnPct.toFixed(1)}%)`);
+                    summaryLines.push(`  SELL ${holding.ticker}: stop loss -4%`);
+                    const fresh = await getPortfolioStatus();
+                    await updatePortfolioStatus(
+                        fresh.cash_balance + (holding.shares * price),
+                        fresh.total_equity - (price * holding.shares)
+                    );
+                    totalEquity -= price * holding.shares;
+                    continue;
+                }
+
+                // 2. Take Profit (+6% to +8%)
+                if (returnPct >= 6 && holding.shares > 0) {
+                    await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Take Profit Target Hit (+6%+)`);
+                    summaryLines.push(`  SELL ${holding.ticker}: take profit +6%`);
+                    const fresh = await getPortfolioStatus();
+                    await updatePortfolioStatus(
+                        fresh.cash_balance + (holding.shares * price),
+                        totalEquity - (price * holding.shares)
+                    );
+                    totalEquity -= price * holding.shares;
+                    continue;
+                }
+
+                // 3. Time-Based Drift Logic (> 3 Days)
+                if (daysHeld > 3 && returnPct < 0) {
+                    const signal = await analyzeTicker(holding.ticker);
+                    if (signal.action === 'SELL' || signal.confidence < 40) {
+                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Time Exit (>3 days red) + Weak Analysis`);
+                        summaryLines.push(`  SELL ${holding.ticker}: time exit (>3d red) + weak analysis`);
                         const fresh = await getPortfolioStatus();
                         await updatePortfolioStatus(
                             fresh.cash_balance + (holding.shares * price),
@@ -95,39 +120,9 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                         totalEquity -= price * holding.shares;
                         continue;
                     }
-
-                    // 2. Take Profit (+6% to +8%)
-                    if (returnPct >= 6 && holding.shares > 0) {
-                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Take Profit Target Hit (+6%+)`);
-                        summaryLines.push(`  SELL ${holding.ticker}: take profit +6%`);
-                        const fresh = await getPortfolioStatus();
-                        await updatePortfolioStatus(
-                            fresh.cash_balance + (holding.shares * price),
-                            totalEquity - (price * holding.shares)
-                        );
-                        totalEquity -= price * holding.shares;
-                        continue;
-                    }
-
-                    // 3. Time-Based Drift Logic (> 3 Days)
-                    if (daysHeld > 3 && returnPct < 0) {
-                        const signal = await analyzeTicker(holding.ticker);
-                        if (signal.action === 'SELL' || signal.confidence < 40) {
-                            await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Time Exit (>3 days red) + Weak Analysis`);
-                            summaryLines.push(`  SELL ${holding.ticker}: time exit (>3d red) + weak analysis`);
-                            const fresh = await getPortfolioStatus();
-                            await updatePortfolioStatus(
-                                fresh.cash_balance + (holding.shares * price),
-                                fresh.total_equity - (price * holding.shares)
-                            );
-                            totalEquity -= price * holding.shares;
-                            continue;
-                        }
-                    }
                 }
             }
-        } catch (e) {
-            console.error(`Failed to update price for ${holding.ticker}`, e);
+        } else {
             totalEquity += holding.market_value;
         }
     }
@@ -742,4 +737,27 @@ function calculateRSI(prices: number[], period: number = 14): number {
 
     const rs = (gains / period) / (losses / period);
     return 100 - (100 / (1 + rs));
+}
+
+export async function syncPortfolioPrices() {
+    console.log(`Starting Portfolio Price Sync`);
+    const holdings = await getHoldings();
+    let totalEquity = 0;
+
+    for (const holding of holdings) {
+        try {
+            const price = await MarketDataService.getCurrentPrice(holding.ticker);
+            if (price) {
+                totalEquity += price * holding.shares;
+                await updateHoldingPrice(holding.ticker, price).catch(() => { });
+            } else {
+                totalEquity += holding.market_value;
+            }
+        } catch (e) {
+            console.error(`Failed to sync price for ${holding.ticker}`, e);
+            totalEquity += holding.market_value;
+        }
+    }
+    const status = await getPortfolioStatus();
+    await updatePortfolioStatus(status.cash_balance, totalEquity);
 }
