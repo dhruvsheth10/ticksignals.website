@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import { getScreenerTicker } from '../../lib/db';
 
 export default async function handler(
   req: NextApiRequest,
@@ -57,35 +58,28 @@ export default async function handler(
       return `${value.toLocaleString()}`;
     };
 
-    // Fetch fundamentals (may fail silently – that's fine)
+    // Fetch fundamentals from local database cache (instant and accurate from our scanner)
     let fundamentalsData: any = null;
     try {
-      const summaryUrl = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${upperTicker}?modules=financialData,summaryDetail,assetProfile,defaultKeyStatistics`;
-      const summaryRes = await fetch(summaryUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
-      });
-      if (summaryRes.ok) {
-        const summaryJson = await summaryRes.json();
-        const result = summaryJson.quoteSummary?.result?.[0];
-        if (result) {
-          const fin = result.financialData || {};
-          const det = result.summaryDetail || {};
-          const prof = result.assetProfile || {};
-          const stats = result.defaultKeyStatistics || {};
-          fundamentalsData = {
-            returnOnEquity: fin.returnOnEquity?.raw ?? null,
-            returnOnAssets: fin.returnOnAssets?.raw ?? null,
-            debtToEquity: fin.debtToEquity?.raw ?? null,
-            grossMargins: fin.grossMargins?.raw ?? null,
-            totalRevenue: fin.totalRevenue?.raw ?? null,
-            fullTimeEmployees: prof.fullTimeEmployees ?? null,
-            sector: prof.sector || null,
-            industry: prof.industry || null,
-            dividendYield: det.dividendYield?.raw ?? null,
-            beta: det.beta?.raw ?? null,
-            trailingPE: det.trailingPE?.raw ?? stats.trailingPE?.raw ?? null,
-          };
-        }
+      const dbData = await getScreenerTicker(upperTicker);
+      if (dbData) {
+        fundamentalsData = {
+          returnOnEquity: dbData.roe_pct != null ? Number(dbData.roe_pct) : null,
+          returnOnAssets: dbData.roa_pct != null ? Number(dbData.roa_pct) : null,
+          debtToEquity: dbData.debt_to_equity != null ? Number(dbData.debt_to_equity) : null,
+          grossMargins: dbData.gross_margin_pct != null ? Number(dbData.gross_margin_pct) : null,
+          totalRevenue: dbData.total_revenue != null ? Number(dbData.total_revenue) : null,
+          fullTimeEmployees: dbData.total_revenue && dbData.revenue_per_employee ? Math.round(Number(dbData.total_revenue) / Number(dbData.revenue_per_employee)) : null,
+          sector: dbData.sector || null,
+          industry: dbData.industry || null,
+          dividendYield: dbData.dividend_yield_pct != null ? Number(dbData.dividend_yield_pct) : null,
+          beta: dbData.beta != null ? Number(dbData.beta) : null,
+          trailingPE: dbData.pe_ratio != null ? Number(dbData.pe_ratio) : null,
+          marketCap: dbData.market_cap != null ? Number(dbData.market_cap) : null,
+          fiftyTwoWeekHigh: dbData.fifty_two_week_high != null ? Number(dbData.fifty_two_week_high) : null,
+          fiftyTwoWeekLow: dbData.fifty_two_week_low != null ? Number(dbData.fifty_two_week_low) : null,
+          companyName: dbData.company_name ?? null
+        };
       }
     } catch (_) {
       // Fundamentals are optional — silently ignore
@@ -96,25 +90,25 @@ export default async function handler(
 
     const responseData = {
       ticker: upperTicker,
-      companyName: meta.shortName || meta.longName || upperTicker,
+      companyName: fundamentalsData?.companyName || meta.shortName || meta.longName || upperTicker,
       price: meta.regularMarketPrice?.toFixed(2) || 'N/A',
       previousClose: meta.chartPreviousClose ?? null,
-      marketCap: meta.marketCap ? formatMarketCap(meta.marketCap) : 'N/A',
+      marketCap: (fundamentalsData?.marketCap || meta.marketCap) ? formatMarketCap(fundamentalsData?.marketCap || meta.marketCap) : 'N/A',
       volume: meta.regularMarketVolume ? meta.regularMarketVolume.toLocaleString() : 'N/A',
       peRatio: fundamentalsData?.trailingPE ? fundamentalsData.trailingPE.toFixed(2) : 'N/A',
       fundamentals: {
-        roe: fundamentalsData?.returnOnEquity != null ? (fundamentalsData.returnOnEquity * 100).toFixed(1) + '%' : 'N/A',
-        roa: fundamentalsData?.returnOnAssets != null ? (fundamentalsData.returnOnAssets * 100).toFixed(1) + '%' : 'N/A',
-        debtToEquity: fundamentalsData?.debtToEquity != null ? fundamentalsData.debtToEquity.toFixed(1) : 'N/A',
-        grossMargin: fundamentalsData?.grossMargins != null ? (fundamentalsData.grossMargins * 100).toFixed(1) + '%' : 'N/A',
-        dividendYield: fundamentalsData?.dividendYield != null ? (fundamentalsData.dividendYield * 100).toFixed(2) + '%' : 'N/A',
+        roe: fundamentalsData?.returnOnEquity != null ? fundamentalsData.returnOnEquity.toFixed(1) + '%' : 'N/A',
+        roa: fundamentalsData?.returnOnAssets != null ? fundamentalsData.returnOnAssets.toFixed(1) + '%' : 'N/A',
+        debtToEquity: fundamentalsData?.debtToEquity != null ? fundamentalsData.debtToEquity.toFixed(2) : 'N/A',
+        grossMargin: fundamentalsData?.grossMargins != null ? fundamentalsData.grossMargins.toFixed(1) + '%' : 'N/A',
+        dividendYield: fundamentalsData?.dividendYield != null ? fundamentalsData.dividendYield.toFixed(2) + '%' : 'N/A',
         beta: fundamentalsData?.beta != null ? fundamentalsData.beta.toFixed(2) : 'N/A',
         totalRevenue: totalRevenue ? formatMarketCap(totalRevenue) : 'N/A',
         revenuePerEmployee: (totalRevenue && employees && employees > 0)
           ? `$${Math.round(totalRevenue / employees).toLocaleString()}`
           : 'N/A',
-        fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ? `$${meta.fiftyTwoWeekHigh.toFixed(2)}` : 'N/A',
-        fiftyTwoWeekLow: meta.fiftyTwoWeekLow ? `$${meta.fiftyTwoWeekLow.toFixed(2)}` : 'N/A',
+        fiftyTwoWeekHigh: (fundamentalsData?.fiftyTwoWeekHigh || meta.fiftyTwoWeekHigh) ? `$${(fundamentalsData?.fiftyTwoWeekHigh || meta.fiftyTwoWeekHigh).toFixed(2)}` : 'N/A',
+        fiftyTwoWeekLow: (fundamentalsData?.fiftyTwoWeekLow || meta.fiftyTwoWeekLow) ? `$${(fundamentalsData?.fiftyTwoWeekLow || meta.fiftyTwoWeekLow).toFixed(2)}` : 'N/A',
         sector: fundamentalsData?.sector || 'N/A',
         industry: fundamentalsData?.industry || 'N/A',
         employees: employees ? employees.toLocaleString() : 'N/A',

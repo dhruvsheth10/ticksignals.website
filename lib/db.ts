@@ -138,6 +138,16 @@ export async function getScreenerData(): Promise<any[]> {
     return result.rows;
 }
 
+// Fetch cached data for a specific ticker
+export async function getScreenerTicker(ticker: string): Promise<any> {
+    if (useInMemory) {
+        return inMemoryCache.find(t => t.ticker === ticker) || null;
+    }
+    const db = getPool();
+    const result = await db.query(`SELECT * FROM screener_cache WHERE ticker = $1`, [ticker]);
+    return result.rows[0] || null;
+}
+
 // Get scan metadata
 export async function getScanMetadata(): Promise<{ count: number; lastUpdated: string | null }> {
     if (useInMemory) {
