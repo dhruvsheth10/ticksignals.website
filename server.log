@@ -1,0 +1,13 @@
+
+> ticksignals@1.0.0 start
+> next start
+
+  ▲ Next.js 14.2.33
+  - Local:        http://localhost:3000
+
+ ✓ Starting...
+ ✓ Ready in 235ms
+(node:79037) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Portfolio + trading tables (Turso) initialized.
+Starting Portfolio Price Sync

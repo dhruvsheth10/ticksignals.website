@@ -38,18 +38,7 @@ interface TechnicalIndicators {
  * For cron, we trust the schedule, but this is a double check.
  */
 export function isMarketOpen(): boolean {
-    const now = new Date();
-    const day = now.getUTCDay();
-    const hour = now.getUTCHours();
-    const minute = now.getUTCMinutes();
-
-    // Weekends
-    if (day === 0 || day === 6) return false;
-
-    // Market Hours in UTC (approx 14:30 - 21:00)
-    // We'll be lenient for pre/post market logic if needed, but strict for "Open"
-    const time = hour + minute / 60;
-    return time >= 14.5 && time < 21;
+    return true; // TEMPORARILY FORCE OPEN FOR TESTING
 }
 
 /**

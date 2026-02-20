@@ -1,5 +1,4 @@
 import https from 'https';
-import yahooFinance from 'yahoo-finance2';
 
 // API Keys - In a real prod environment these should be in .env,
 // but for this specific request we are embedding them as fallbacks/defaults.
@@ -28,25 +27,16 @@ function sleep(ms: number) {
 }
 
 // Simple HTTPS GET wrapper
-function httpsGet(url: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-        const req = https.get(url, (res) => {
-            let body = '';
-            res.on('data', (chunk) => (body += chunk));
-            res.on('end', () => {
-                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                    try {
-                        resolve(JSON.parse(body));
-                    } catch (e) {
-                        reject(new Error(`Failed to parse JSON: ${body}`));
-                    }
-                } else {
-                    reject(new Error(`API Error: ${res.statusCode} ${body}`));
-                }
-            });
-        });
-        req.on('error', reject);
+async function httpsGet(urlString: string): Promise<any> {
+    const res = await fetch(urlString, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36',
+            'Accept': 'application/json'
+        },
+        cache: 'no-store'
     });
+    if (!res.ok) throw new Error(`API Error: ${res.status} ${res.statusText}`);
+    return res.json();
 }
 
 export interface Candle {
@@ -100,7 +90,35 @@ export class MarketDataService {
         const to = Math.floor(Date.now() / 1000);
         const from = to - (days * 86400 * 2); // Fetch extra buffer for weekends/holidays
 
-        // 1. Try Finnhub
+        // 1. Give Yahoo Finance priority (No hard rate limits compared to Finnhub/AV)
+        try {
+            // Calculate range in months roughly
+            const data = await httpsGet(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y`);
+            const result = data?.chart?.result?.[0];
+            if (result?.timestamp && result?.indicators?.quote?.[0]) {
+                const quote = result.indicators.quote[0];
+                const candles = [];
+                for (let i = 0; i < result.timestamp.length; i++) {
+                    // Start from right before 200 days approx 
+                    if (result.timestamp.length - i <= days + 5) {
+                        candles.push({
+                            date: new Date(result.timestamp[i] * 1000).toISOString(),
+                            open: quote.open[i] ?? quote.close[i],
+                            high: quote.high[i] ?? quote.close[i],
+                            low: quote.low[i] ?? quote.close[i],
+                            close: quote.close[i],
+                            volume: quote.volume[i] ?? 0
+                        });
+                    }
+                }
+                const filtered = candles.filter((q: any) => q.close !== null && q.close !== undefined);
+                if (filtered.length > 0) return filtered;
+            }
+        } catch (e: any) {
+            console.warn(`[MarketData] Yahoo chart failed for ${ticker}:`, e.message);
+        }
+
+        // 2. Try Finnhub
         try {
             const data = await this.fetchFinnhub(ticker, 'D', from, to);
             // Finnhub format: { c: [], h: [], l: [], o: [], v: [], t: [], s: 'ok' }
@@ -114,8 +132,8 @@ export class MarketDataService {
                     volume: data.v[i]
                 }));
             }
-        } catch (e) {
-            console.warn(`[MarketData] Finnhub failed for ${ticker}:`, (e as Error).message);
+        } catch (e: any) {
+            console.warn(`[MarketData] Finnhub failed for ${ticker}:`, e.message);
         }
 
         // 2. Try Alpha Vantage (Only if within safe limit and strictly needed)
@@ -265,13 +283,13 @@ export class MarketDataService {
     static async getCurrentPrice(ticker: string): Promise<number | null> {
         // 1. Give Yahoo Finance priority for simple spot prices (No Rate Limits)
         try {
-            const quote = await yahooFinance.quote(ticker);
-            const price = (quote as any)?.regularMarketPrice;
-            if (price && price > 0) {
+            const data = await httpsGet(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`);
+            const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+            if (price && typeof price === 'number' && price > 0) {
                 return price;
             }
-        } catch (e) {
-            console.warn(`[MarketData] Yahoo Finance quote failed for ${ticker}`, e);
+        } catch (e: any) {
+            console.warn(`[MarketData] Yahoo Finance quote failed for ${ticker}:`, e.message);
         }
 
         // 2. Try Finnhub Quote (Backup)
