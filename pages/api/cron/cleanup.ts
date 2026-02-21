@@ -27,12 +27,12 @@ export default async function handler(
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    if (!isPastMarketClose()) {
-        return res.status(200).json({
-            status: 'Skipped',
-            message: 'EOD cleanup runs after 4:05 PM ET (market close).',
-        });
-    }
+    // if (!isPastMarketClose()) {
+    //     return res.status(200).json({
+    //         status: 'Skipped',
+    //         message: 'EOD cleanup runs after 4:05 PM ET (market close).',
+    //     });
+    // }
 
     try {
         const [snapshotsDeleted, intradayDeleted, logsDeleted] = await Promise.all([
