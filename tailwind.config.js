@@ -25,8 +25,6 @@ module.exports = {
       backgroundImage: {
         'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
         'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-        'aqua-gradient': 'linear-gradient(135deg, #0f766e 0%, #134e4a 50%, #0c4a6e 100%)',
-        'aqua-gradient-subtle': 'linear-gradient(135deg, rgba(15, 118, 110, 0.1) 0%, rgba(19, 78, 74, 0.05) 100%)',
       },
       animation: {
         'fade-in': 'fadeIn 0.5s ease-in-out',

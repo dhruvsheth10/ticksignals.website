@@ -3,6 +3,7 @@ import {
   Search, DollarSign, Activity, AlertCircle, BarChart3,
   TrendingUp, Percent, Building2, Users, Globe
 } from 'lucide-react';
+import BlurText from './BlurText';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -351,19 +352,21 @@ export default function TickerAnalyzer({ initialTicker }: TickerAnalyzerProps) {
   const MetricCard = ({ icon: Icon, label, value, color = 'text-white' }: {
     icon: any; label: string; value: string; color?: string;
   }) => (
-    <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-4 border border-gray-700/50 hover:border-gray-600/50 transition-all">
+    <div className="bg-gray-800 rounded-xl p-4 border border-gray-700 hover:border-gray-600 transition-colors">
       <div className="flex items-center gap-2 text-gray-400 text-xs mb-1.5">
         <Icon size={14} />
         <span>{label}</span>
       </div>
-      <p className={`text-lg font-bold ${color}`}>{value}</p>
+      <div className={`text-lg font-bold flex ${color}`}>
+        <BlurText text={value} delay={50} />
+      </div>
     </div>
   );
 
   return (
     <div className="space-y-6">
       {/* Search Bar */}
-      <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-5 border border-gray-700/50">
+      <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
         <div className="flex gap-3">
           <div className="flex-1 relative">
             <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
@@ -379,7 +382,7 @@ export default function TickerAnalyzer({ initialTicker }: TickerAnalyzerProps) {
           <button
             onClick={() => analyzeStock()}
             disabled={loading || !ticker}
-            className="px-6 py-3 bg-gradient-to-r from-aquamarine-600 to-cyan-600 text-white font-medium rounded-lg hover:from-aquamarine-500 hover:to-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-aquamarine-500/30"
+            className="px-6 py-3 bg-aquamarine-600 text-white font-medium rounded-lg hover:bg-aquamarine-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {loading ? 'Analyzing...' : 'Analyze'}
           </button>
@@ -404,7 +407,7 @@ export default function TickerAnalyzer({ initialTicker }: TickerAnalyzerProps) {
           </div>
 
           {/* Price Chart */}
-          <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-5 border border-gray-700/50">
+          <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
             {displayPoints.length > 1 ? (
               <>
                 <PriceChart points={displayPoints} range={activeRange} accentColor={accentColor} />

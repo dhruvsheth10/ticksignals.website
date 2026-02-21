@@ -372,7 +372,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     return (
         <div className="space-y-4">
             {/* Top Control Bar */}
-            <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-4 border border-gray-700/50">
+            <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                         <div className="flex items-center gap-2">
@@ -426,7 +426,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                         <button
                             onClick={runScreener}
                             disabled={scanning}
-                            className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-aquamarine-600 to-cyan-600 text-white font-medium rounded-lg hover:from-aquamarine-500 hover:to-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-aquamarine-500/20 text-sm"
+                            className="flex items-center gap-1.5 px-4 py-2 bg-aquamarine-600 text-white font-medium rounded-lg hover:bg-aquamarine-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
                         >
                             <RefreshCw size={14} className={scanning ? 'animate-spin' : ''} />
                             {scanning ? 'Scanning...' : 'Run Scan'}
@@ -446,7 +446,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
 
             {/* Filter Panel */}
             {filtersOpen && (
-                <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-5 border border-gray-700/30 animate-slide-up">
+                <div className="bg-gray-800 rounded-xl p-5 border border-gray-700 animate-slide-up">
                     {/* Presets */}
                     <div className="flex flex-wrap gap-2 mb-5">
                         {PRESETS.map((preset) => {
@@ -540,7 +540,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
             )}
 
             {/* Results Table */}
-            <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl border border-gray-700/50 overflow-hidden">
+            <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
                 {loading ? (
                     <div className="text-center py-16">
                         <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-aquamarine-400"></div>
@@ -563,7 +563,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                         <table className="w-full min-w-[900px]">
                             <thead>
                                 <tr className="border-b border-gray-700/50 bg-gray-900/30">
-                                    <SortHeader label="Ticker" colKey="ticker" className="sticky left-0 bg-gray-900/90 backdrop-blur-sm z-10 text-center pl-4" />
+                                    <SortHeader label="Ticker" colKey="ticker" className="sticky left-0 bg-gray-900 z-10 text-center pl-4" />
                                     <SortHeader label="Price" colKey="price" />
                                     <SortHeader label="Mkt Cap" colKey="market_cap" />
                                     <SortHeader label="P/E" colKey="pe_ratio" />
@@ -584,7 +584,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                                         className={`border-b border-gray-800/30 hover:bg-gray-700/20 transition-colors ${idx % 2 === 0 ? 'bg-gray-800/10' : ''
                                             }`}
                                     >
-                                        <td className="py-2.5 px-3 sticky left-0 bg-gray-900/80 backdrop-blur-sm z-10 text-center">
+                                        <td className="py-2.5 px-3 sticky left-0 bg-gray-900 z-10 text-center">
                                             <button
                                                 onClick={() => onTickerClick?.(stock.ticker)}
                                                 className="group flex flex-col items-center justify-center w-full"

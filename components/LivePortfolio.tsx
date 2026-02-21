@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText } from 'lucide-react';
+import BlurText from './BlurText';
 
 interface PortfolioData {
     status: {
@@ -86,14 +87,13 @@ const LivePortfolio = () => {
             {/* Top Summary Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* Total Value Card */}
-                <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6 relative overflow-hidden group hover:border-aquamarine-500/30 transition-all">
-                    <div className="absolute inset-0 bg-gradient-to-br from-aquamarine-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="bg-gray-800 rounded-xl p-6 relative overflow-hidden transition-colors border border-gray-700 hover:border-gray-500">
                     <h3 className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-2">
                         <Activity size={16} /> Total Portfolio Value
                     </h3>
                     <div className="text-3xl font-bold text-white flex items-baseline gap-2">
-                        ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        <span className={`text-sm font-medium px-2 py-0.5 rounded-full ${isPositive ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                        $<BlurText text={totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} className="inline-block" delay={50} />
+                        <span className={`text-sm ml-2 font-medium px-2 py-0.5 rounded-full ${isPositive ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
                             {isPositive ? '+' : ''}{totalReturn.toFixed(2)}%
                         </span>
                     </div>
@@ -101,7 +101,7 @@ const LivePortfolio = () => {
                 </div>
 
                 {/* Cash vs Equity */}
-                <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6 flex flex-col justify-center">
+                <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 flex flex-col justify-center">
                     <div className="flex justify-between items-center mb-2">
                         <span className="text-gray-400 text-sm">Cash Balance</span>
                         <span className="text-white font-mono">${cash.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
@@ -120,7 +120,7 @@ const LivePortfolio = () => {
 
                 {/* Quick Stats or Small Chart */}
                 {/* For now, just a placeholder or extra stat */}
-                <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6 flex flex-col justify-center items-center text-center">
+                <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 flex flex-col justify-center items-center text-center">
                     <PieChart className="w-8 h-8 text-aquamarine-400 mb-2" />
                     <div className="text-2xl font-bold text-white">{data.holdings.length}</div>
                     <div className="text-sm text-gray-400">Active Positions</div>
@@ -132,7 +132,7 @@ const LivePortfolio = () => {
                 <div className="lg:col-span-2 space-y-6">
 
                     {/* Chart Section */}
-                    <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl p-6">
+                    <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-lg font-bold text-white">Portfolio Growth</h3>
                             <div className="flex gap-2 bg-gray-900/50 p-1 rounded-lg">
@@ -200,8 +200,8 @@ const LivePortfolio = () => {
                     </div>
 
                     {/* Holdings Table */}
-                    <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden">
-                        <div className="p-4 border-b border-gray-700/50 flex justify-between items-center">
+                    <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                        <div className="p-4 border-b border-gray-700 flex justify-between items-center">
                             <h3 className="text-lg font-bold text-white">Current Holdings</h3>
                         </div>
                         <div className="overflow-x-auto">
@@ -247,8 +247,8 @@ const LivePortfolio = () => {
                 </div>
 
                 {/* Right Column: Transactions + Admin Logs (1/3 width) */}
-                <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl overflow-hidden flex flex-col h-full max-h-[800px]">
-                    <div className="p-4 border-b border-gray-700/50 bg-gray-800/80 sticky top-0 z-10 flex items-center justify-between">
+                <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden flex flex-col h-full max-h-[800px]">
+                    <div className="p-4 border-b border-gray-700 bg-gray-800 sticky top-0 z-10 flex items-center justify-between">
                         <h3 className="text-lg font-bold text-white flex items-center gap-2">
                             <HistoryIcon />
                             Trade History
