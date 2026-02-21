@@ -91,31 +91,32 @@ export class MarketDataService {
         const from = to - (days * 86400 * 2); // Fetch extra buffer for weekends/holidays
 
         // 1. Give Yahoo Finance priority (No hard rate limits compared to Finnhub/AV)
-        try {
-            // Calculate range in months roughly
-            const data = await httpsGet(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y`);
-            const result = data?.chart?.result?.[0];
-            if (result?.timestamp && result?.indicators?.quote?.[0]) {
-                const quote = result.indicators.quote[0];
-                const candles = [];
-                for (let i = 0; i < result.timestamp.length; i++) {
-                    // Start from right before 200 days approx 
-                    if (result.timestamp.length - i <= days + 5) {
-                        candles.push({
-                            date: new Date(result.timestamp[i] * 1000).toISOString(),
-                            open: quote.open[i] ?? quote.close[i],
-                            high: quote.high[i] ?? quote.close[i],
-                            low: quote.low[i] ?? quote.close[i],
-                            close: quote.close[i],
-                            volume: quote.volume[i] ?? 0
-                        });
+        // Use query2 as backup if query1 returns 429
+        for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
+            try {
+                const data = await httpsGet(`https://${host}/v8/finance/chart/${ticker}?interval=1d&range=2y`);
+                const result = data?.chart?.result?.[0];
+                if (result?.timestamp && result?.indicators?.quote?.[0]) {
+                    const quote = result.indicators.quote[0];
+                    const candles: any[] = [];
+                    for (let i = 0; i < result.timestamp.length; i++) {
+                        if (result.timestamp.length - i <= days + 10) {
+                            candles.push({
+                                date: new Date(result.timestamp[i] * 1000).toISOString(),
+                                open: quote.open[i] ?? quote.close[i],
+                                high: quote.high[i] ?? quote.close[i],
+                                low: quote.low[i] ?? quote.close[i],
+                                close: quote.close[i],
+                                volume: quote.volume[i] ?? 0
+                            });
+                        }
                     }
+                    const filtered = candles.filter((q: any) => q.close !== null && q.close !== undefined);
+                    if (filtered.length > 0) return filtered;
                 }
-                const filtered = candles.filter((q: any) => q.close !== null && q.close !== undefined);
-                if (filtered.length > 0) return filtered;
+            } catch (e: any) {
+                console.warn(`[MarketData] Yahoo chart (${host}) failed for ${ticker}:`, e.message);
             }
-        } catch (e: any) {
-            console.warn(`[MarketData] Yahoo chart failed for ${ticker}:`, e.message);
         }
 
         // 2. Try Finnhub
@@ -282,14 +283,17 @@ export class MarketDataService {
      */
     static async getCurrentPrice(ticker: string): Promise<number | null> {
         // 1. Give Yahoo Finance priority for simple spot prices (No Rate Limits)
-        try {
-            const data = await httpsGet(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`);
-            const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
-            if (price && typeof price === 'number' && price > 0) {
-                return price;
+        // Try query2 first, fallback to query1 if 429
+        for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
+            try {
+                const data = await httpsGet(`https://${host}/v8/finance/chart/${ticker}?interval=1m&range=1d`);
+                const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+                if (price && typeof price === 'number' && price > 0) {
+                    return price;
+                }
+            } catch (e: any) {
+                console.warn(`[MarketData] Yahoo Finance quote (${host}) failed for ${ticker}:`, e.message);
             }
-        } catch (e: any) {
-            console.warn(`[MarketData] Yahoo Finance quote failed for ${ticker}:`, e.message);
         }
 
         // 2. Try Finnhub Quote (Backup)

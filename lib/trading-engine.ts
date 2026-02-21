@@ -38,7 +38,20 @@ interface TechnicalIndicators {
  * For cron, we trust the schedule, but this is a double check.
  */
 export function isMarketOpen(): boolean {
-    return true; // TEMPORARILY FORCE OPEN FOR TESTING
+    const now = new Date();
+    // Use toLocaleString with ET timezone for accurate market hours
+    const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const et = new Date(etStr);
+    const day = et.getDay(); // 0 = Sun, 6 = Sat
+    const hour = et.getHours();
+    const minute = et.getMinutes();
+
+    // Weekends
+    if (day === 0 || day === 6) return false;
+
+    // Market Hours ET: 9:30 AM - 4:00 PM
+    const time = hour + minute / 60;
+    return time >= 9.5 && time < 16;
 }
 
 /**
