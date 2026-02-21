@@ -38,6 +38,7 @@ const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T')
 const LivePortfolio = () => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
+    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D'>('30D');
     const [showAdminLogs, setShowAdminLogs] = useState(false);
     const [adminPassword, setAdminPassword] = useState('');
     const [adminLoading, setAdminLoading] = useState(false);
@@ -132,10 +133,33 @@ const LivePortfolio = () => {
 
                     {/* Chart Section */}
                     <div className="bg-gray-800/50 border border-gray-700/50 rounded-xl p-6">
-                        <h3 className="text-lg font-bold text-white mb-4">Portfolio Growth</h3>
-                        <div className="h-[300px] w-full">
-                            <ResponsiveContainer width="100%" height="100%">
-                                <AreaChart data={data.history}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-white">Portfolio Growth</h3>
+                            <div className="flex gap-2 bg-gray-900/50 p-1 rounded-lg">
+                                {['1D', '1W', '30D'].map(tf => (
+                                    <button
+                                        key={tf}
+                                        onClick={() => setTimeframe(tf as '1D' | '1W' | '30D')}
+                                        className={`px-3 py-1 rounded text-sm font-medium transition-colors ${timeframe === tf
+                                            ? 'bg-aquamarine-500/20 text-aquamarine-400 border border-aquamarine-500/30'
+                                            : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                                            }`}
+                                    >
+                                        {tf}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="h-[300px] w-full" style={{ outline: 'none' }}>
+                            <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
+                                <AreaChart
+                                    data={
+                                        timeframe === '1D' ? data.history.slice(-2)
+                                            : timeframe === '1W' ? data.history.slice(-7)
+                                                : data.history
+                                    }
+                                    style={{ outline: 'none' }}
+                                >
                                     <defs>
                                         <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
                                             <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
@@ -167,6 +191,8 @@ const LivePortfolio = () => {
                                         strokeWidth={2}
                                         fillOpacity={1}
                                         fill="url(#colorValue)"
+                                        activeDot={{ stroke: 'none', r: 4 }}
+                                        style={{ outline: 'none' }}
                                     />
                                 </AreaChart>
                             </ResponsiveContainer>

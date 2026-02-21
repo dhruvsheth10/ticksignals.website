@@ -1,6 +1,6 @@
 
 import { getPool } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice } from './portfolio-db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, saveHistorySnapshot } from './portfolio-db';
 import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
 
@@ -269,7 +269,17 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${why}`);
         }
     }
+
     try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
+
+    // Save EOD History
+    if (type === 'CLOSE') {
+        try {
+            await saveHistorySnapshot();
+            console.log('EOD Portfolio history snapshot saved.');
+        } catch (e) { console.error('Failed to save daily history snapshot', e); }
+    }
+
     console.log('Trading Cycle Completed');
 }
 

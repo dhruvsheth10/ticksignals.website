@@ -283,6 +283,30 @@ export async function getHistory(days = 30): Promise<PortfolioHistory[]> {
     }));
 }
 
+export async function saveHistorySnapshot(): Promise<void> {
+    const db = getTurso();
+    const status = await getPortfolioStatus();
+    const now = new Date();
+    // Use ET date for consistency
+    const dateStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).split('/').reverse().join('-'); // Output roughly YYYY-MM-DD format (not perfectly ISO but works, let's use standard ISO slices)
+
+    const etDateStr = now.toLocaleDateString('sv'); // 'sv' locale outputs YYYY-MM-DD
+
+    // Calculate previous day change
+    const prevR = await db.execute({ sql: 'SELECT total_value FROM portfolio_history ORDER BY date DESC LIMIT 1', args: [] });
+    const prevData = prevR.rows[0] as any;
+    let dayChange = 0;
+    if (prevData && prevData.total_value > 0) {
+        dayChange = ((status.total_value - prevData.total_value) / prevData.total_value) * 100;
+    }
+
+    await db.execute({
+        sql: `INSERT OR REPLACE INTO portfolio_history (date, total_value, cash_balance, equity_value, day_change_pct)
+              VALUES (?, ?, ?, ?, ?)`,
+        args: [etDateStr, status.total_value, status.cash_balance, status.total_equity, dayChange]
+    });
+}
+
 export async function executeTrade(
     ticker: string,
     type: 'BUY' | 'SELL',
