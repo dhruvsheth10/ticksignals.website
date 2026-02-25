@@ -14,7 +14,12 @@
 /build
 # misc
 .DS_Store
+# Oracle VM
 ORACLE_VM_CRONS.md
+oracle-service/
+oracle-service.tar.gz
+oracle-service
+
 *.pem
 
 # SSH keys
@@ -24,6 +29,8 @@ SSH*.key
 SSH*.pub
 *.key
 *.pub
+SSH Key *.key
+SSH Key *.pub
 
 # debug
 npm-debug.log*
