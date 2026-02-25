@@ -22,6 +22,9 @@ export interface PortfolioHolding {
     return_pct: number;
     last_updated: string;
     opened_at: string;
+    high_water_mark: number;
+    partial_sells: number;
+    atr: number;
 }
 
 export interface PortfolioTransaction {
@@ -100,9 +103,23 @@ export async function initPortfolioTables(): Promise<void> {
         market_value REAL,
         return_pct REAL,
         last_updated TEXT DEFAULT (datetime('now')),
-        opened_at TEXT DEFAULT (datetime('now'))
+        opened_at TEXT DEFAULT (datetime('now')),
+        high_water_mark REAL DEFAULT 0,
+        partial_sells INTEGER DEFAULT 0,
+        atr REAL DEFAULT 0
       )
     `);
+
+    // Migration: add new columns to existing tables (safe — ignores if they already exist)
+    for (const col of [
+        { name: 'high_water_mark', type: 'REAL DEFAULT 0' },
+        { name: 'partial_sells', type: 'INTEGER DEFAULT 0' },
+        { name: 'atr', type: 'REAL DEFAULT 0' },
+    ]) {
+        try {
+            await db.execute(`ALTER TABLE portfolio_holdings ADD COLUMN ${col.name} ${col.type}`);
+        } catch { /* column already exists */ }
+    }
 
     await db.execute(`
       CREATE TABLE IF NOT EXISTS portfolio_transactions (
@@ -236,6 +253,15 @@ export async function updateHoldingPrice(ticker: string, current_price: number):
     });
 }
 
+export async function updateHighWaterMark(ticker: string, price: number): Promise<void> {
+    const db = getTurso();
+    await db.execute({
+        sql: `UPDATE portfolio_holdings SET high_water_mark = MAX(COALESCE(high_water_mark, 0), ?)
+              WHERE ticker = ?`,
+        args: [price, ticker],
+    });
+}
+
 export async function getHoldings(): Promise<PortfolioHolding[]> {
     const db = getTurso();
     const r = await db.execute({ sql: 'SELECT * FROM portfolio_holdings ORDER BY market_value DESC', args: [] });
@@ -252,6 +278,9 @@ export async function getHoldings(): Promise<PortfolioHolding[]> {
             return_pct: return_pct,
             last_updated: row.last_updated || '',
             opened_at: row.opened_at || '',
+            high_water_mark: row.high_water_mark || 0,
+            partial_sells: row.partial_sells || 0,
+            atr: row.atr || 0,
         };
     });
 }
@@ -312,7 +341,8 @@ export async function executeTrade(
     type: 'BUY' | 'SELL',
     shares: number,
     price: number,
-    notes?: string
+    notes?: string,
+    tradeMetadata?: { atr?: number }
 ): Promise<void> {
     const db = getTurso();
     const totalAmount = shares * price;
@@ -331,16 +361,17 @@ export async function executeTrade(
         if (h) {
             const newShares = h.shares + shares;
             const newCost = ((h.shares * h.avg_cost) + totalAmount) / newShares;
+            const newHWM = Math.max(h.high_water_mark || 0, price);
             await db.execute({
-                sql: `UPDATE portfolio_holdings SET shares = ?, avg_cost = ?, current_price = ?, market_value = ?, last_updated = ?
-                      WHERE ticker = ?`,
-                args: [newShares, newCost, price, newShares * price, now, ticker],
+                sql: `UPDATE portfolio_holdings SET shares = ?, avg_cost = ?, current_price = ?, market_value = ?,
+                      high_water_mark = ?, last_updated = ? WHERE ticker = ?`,
+                args: [newShares, newCost, price, newShares * price, newHWM, now, ticker],
             });
         } else {
             await db.execute({
-                sql: `INSERT INTO portfolio_holdings (ticker, shares, avg_cost, current_price, market_value, opened_at)
-                      VALUES (?, ?, ?, ?, ?, ?)`,
-                args: [ticker, shares, price, price, totalAmount, now],
+                sql: `INSERT INTO portfolio_holdings (ticker, shares, avg_cost, current_price, market_value, opened_at, high_water_mark, partial_sells, atr)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+                args: [ticker, shares, price, price, totalAmount, now, price, tradeMetadata?.atr || 0],
             });
         }
     } else {
@@ -356,10 +387,11 @@ export async function executeTrade(
                 args: [ticker, now],
             });
         } else {
+            const newPartialSells = (h.partial_sells || 0) + 1;
             await db.execute({
-                sql: `UPDATE portfolio_holdings SET shares = ?, current_price = ?, market_value = ?, last_updated = ?
-                      WHERE ticker = ?`,
-                args: [newShares, price, newShares * price, now, ticker],
+                sql: `UPDATE portfolio_holdings SET shares = ?, current_price = ?, market_value = ?,
+                      partial_sells = ?, last_updated = ? WHERE ticker = ?`,
+                args: [newShares, price, newShares * price, newPartialSells, now, ticker],
             });
         }
     }
@@ -382,10 +414,10 @@ export async function saveAnalysisResult(data: {
 }): Promise<void> {
     const db = getTurso();
     await db.execute({
-        sql: `INSERT INTO trading_analysis_results (ticker, action, confidence, reason,
-              sentiment_score, sentiment_confidence, rsi, macd_histogram, volume_ratio,
-              price_change_pct, sma50, sma200)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO trading_analysis_results(ticker, action, confidence, reason,
+                sentiment_score, sentiment_confidence, rsi, macd_histogram, volume_ratio,
+                price_change_pct, sma50, sma200)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
             data.ticker,
             data.action,
@@ -406,7 +438,7 @@ export async function saveAnalysisResult(data: {
 export async function saveCycleLog(cycleType: string, summary: string): Promise<void> {
     const db = getTurso();
     await db.execute({
-        sql: `INSERT INTO trading_cycle_log (cycle_type, summary) VALUES (?, ?)`,
+        sql: `INSERT INTO trading_cycle_log(cycle_type, summary) VALUES(?, ?)`,
         args: [cycleType, summary],
     });
 }
@@ -433,8 +465,8 @@ export async function getAnalysisResults(limit = 50): Promise<any[]> {
         const db = getTurso();
         const r = await db.execute({
             sql: `SELECT ticker, action, confidence, reason, sentiment_score, sentiment_confidence,
-                  rsi, macd_histogram, volume_ratio, price_change_pct, sma50, sma200, analyzed_at
-                  FROM trading_analysis_results ORDER BY analyzed_at DESC LIMIT ?`,
+                rsi, macd_histogram, volume_ratio, price_change_pct, sma50, sma200, analyzed_at
+                  FROM trading_analysis_results ORDER BY analyzed_at DESC LIMIT ? `,
             args: [limit],
         });
         return (r.rows as any[]).map(row => ({
@@ -475,8 +507,8 @@ export async function getLastAnalysisAt(): Promise<string | null> {
 export async function saveDailySnapshot(row: Omit<DailySnapshot, 'snapshot_at'> & { snapshot_at: string }): Promise<void> {
     const db = getTurso();
     await db.execute({
-        sql: `INSERT INTO daily_snapshots (ticker, snapshot_at, interval_type, open, high, low, close, volume, vwap, rvol)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO daily_snapshots(ticker, snapshot_at, interval_type, open, high, low, close, volume, vwap, rvol)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [row.ticker, row.snapshot_at, row.interval_type, row.open, row.high, row.low, row.close, row.volume, row.vwap, row.rvol],
     });
 }
@@ -509,8 +541,8 @@ export async function getDailySnapshots(ticker: string, days = 5): Promise<Daily
 export async function saveIntradayBar(row: IntradayHolding): Promise<void> {
     const db = getTurso();
     await db.execute({
-        sql: `INSERT INTO intraday_holdings (ticker, bar_time, open, high, low, close, volume, vwap)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        sql: `INSERT INTO intraday_holdings(ticker, bar_time, open, high, low, close, volume, vwap)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [row.ticker, row.bar_time, row.open, row.high, row.low, row.close, row.volume, row.vwap],
     });
 }
@@ -518,12 +550,12 @@ export async function saveIntradayBar(row: IntradayHolding): Promise<void> {
 export async function getIntradayBars(ticker: string, dateStr?: string): Promise<IntradayHolding[]> {
     const db = getTurso();
     const target = dateStr || new Date().toISOString().slice(0, 10);
-    const start = `${target}T00:00:00`;
-    const end = `${target}T23:59:59`;
+    const start = `${target} T00:00:00`;
+    const end = `${target} T23: 59: 59`;
     const r = await db.execute({
         sql: `SELECT ticker, bar_time, open, high, low, close, volume, vwap
               FROM intraday_holdings WHERE ticker = ? AND bar_time >= ? AND bar_time <= ?
-              ORDER BY bar_time ASC`,
+                ORDER BY bar_time ASC`,
         args: [ticker, start, end],
     });
     return (r.rows as any[]).map(row => ({

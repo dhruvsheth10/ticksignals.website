@@ -1,15 +1,19 @@
 
 import { getPool } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, saveHistorySnapshot } from './portfolio-db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot } from './portfolio-db';
 import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
+
+// ══════════════════════════════════════════════════════════════════════
+// INTERFACES
+// ══════════════════════════════════════════════════════════════════════
 
 export interface TradeSignal {
     ticker: string;
     action: 'BUY' | 'SELL' | 'HOLD';
     reason: string;
     confidence: number;
-    sentimentBoost?: number; // Additional confidence from sentiment
+    sentimentBoost?: number;
     indicators?: {
         rsi: number;
         macdHistogram: number;
@@ -17,243 +21,313 @@ export interface TradeSignal {
         priceChangePct: number;
         sma50: number;
         sma200: number;
-        rvol?: number;   // relative volume vs 30d avg (from Turso snapshots)
-        vwap?: number;   // intraday VWAP (from Turso intraday bars)
+        rvol?: number;
+        vwap?: number;
+        atr?: number;
+        adx?: number;
+        stochRsi?: number;
+        obv?: number;
     };
 }
 
 interface TechnicalIndicators {
-    sma50: number;
-    sma200: number;
+    ema10: number;
+    ema50: number;
     rsi: number;
     macd: { macd: number; signal: number; histogram: number };
-    volumeRatio: number; // Current volume vs 20-day average
+    volumeRatio: number;
     bollingerBands: { upper: number; middle: number; lower: number };
-    priceChange: number; // % change from 20 days ago
+    priceChange: number;
+    atr: number;
+    adx: number;
+    stochRsi: number;
+    obvTrend: number; // positive = accumulation, negative = distribution
 }
 
-/**
- * Check if Market is Open
- * (Simple check: Mon-Fri, 9:30 AM - 4:00 PM ET)
- * For cron, we trust the schedule, but this is a double check.
- */
+// ══════════════════════════════════════════════════════════════════════
+// MARKET HOURS
+// ══════════════════════════════════════════════════════════════════════
+
 export function isMarketOpen(): boolean {
     const now = new Date();
-    // Use toLocaleString with ET timezone for accurate market hours
     const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
     const et = new Date(etStr);
-    const day = et.getDay(); // 0 = Sun, 6 = Sat
+    const day = et.getDay();
     const hour = et.getHours();
     const minute = et.getMinutes();
-
-    // Weekends
     if (day === 0 || day === 6) return false;
-
-    // Market Hours ET: 9:30 AM - 4:00 PM
     const time = hour + minute / 60;
     return time >= 9.5 && time < 16;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// CORE TRADING ENGINE
+// ══════════════════════════════════════════════════════════════════════
+
 /**
- * Core Trading Engine (Enhanced)
- * OPEN/MID/CLOSE: full cycle (sync, sell logic, buy scan).
- * PORTFOLIO_CHECK: sync + stop loss + take profit + sell signals only (no new buys). Use every 15 min when holding.
- * For each holding, sell logic uses full analyzeTicker() — 200d chart, RSI, MACD, Bollinger Bands, volume, sentiment — not just price.
+ * Core Trading Cycle — Revamped for multi-position intraday/swing trading.
+ *
+ * OPEN/MID/CLOSE: full cycle (sync → sell logic → buy scan)
+ * PORTFOLIO_CHECK: sync + trailing stops + partial profits + sell signals (no new buys)
+ *
+ * Key improvements over v1:
+ * - ATR-based trailing stops instead of fixed -4%
+ * - Partial profit taking at +5%/+10%/+15%
+ * - Up to 4 buys per cycle (was 1-2)
+ * - Dynamic position sizing by confidence + risk
+ * - ADX trend strength filter
+ * - StochRSI timing + OBV confirmation
  */
 export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLIO_CHECK') {
-    console.log(`Starting Trading Cycle: ${type}`);
+    console.log(`[Engine] Starting Trading Cycle: ${type}`);
     const db = getPool();
     const summaryLines: string[] = [];
+    const isPortfolioOnly = type === 'PORTFOLIO_CHECK';
 
-    // 1. Sync Current Prices for Holdings
+    // ── 1. Sync Current Prices + Update High Water Marks ──
     const holdings = await getHoldings();
     let totalEquity = 0;
     summaryLines.push(`Holdings: ${holdings.length} (${holdings.map(h => h.ticker).join(', ') || 'none'})`);
 
-    const isPortfolioOnly = type === 'PORTFOLIO_CHECK';
-
     for (const holding of holdings) {
-        const price = holding.current_price;
-        if (price) {
-            totalEquity += price * holding.shares;
-
-            // Stop Loss / Take Profit (MID, CLOSE, or any PORTFOLIO_CHECK)
-            if (type === 'MID' || type === 'CLOSE' || isPortfolioOnly) {
-                const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
-                const daysHeld = holding.opened_at ? (Date.now() - new Date(holding.opened_at).getTime()) / (1000 * 60 * 60 * 24) : 0;
-
-                // 1. Tighter Stop Loss (-4%)
-                if (returnPct < -4) {
-                    await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Hard Stop Loss (-4%) Hit (${returnPct.toFixed(1)}%)`);
-                    summaryLines.push(`  SELL ${holding.ticker}: stop loss -4%`);
-                    const fresh = await getPortfolioStatus();
-                    await updatePortfolioStatus(
-                        fresh.cash_balance + (holding.shares * price),
-                        fresh.total_equity - (price * holding.shares)
-                    );
-                    totalEquity -= price * holding.shares;
-                    continue;
-                }
-
-                // 2. Take Profit (+6% to +8%)
-                if (returnPct >= 6 && holding.shares > 0) {
-                    await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Take Profit Target Hit (+6%+)`);
-                    summaryLines.push(`  SELL ${holding.ticker}: take profit +6%`);
-                    const fresh = await getPortfolioStatus();
-                    await updatePortfolioStatus(
-                        fresh.cash_balance + (holding.shares * price),
-                        totalEquity - (price * holding.shares)
-                    );
-                    totalEquity -= price * holding.shares;
-                    continue;
-                }
-
-                // 3. Time-Based Drift Logic (> 3 Days)
-                if (daysHeld > 3 && returnPct < 0) {
-                    const signal = await analyzeTicker(holding.ticker);
-                    if (signal.action === 'SELL' || signal.confidence < 40) {
-                        await executeTrade(holding.ticker, 'SELL', holding.shares, price, `Time Exit (>3 days red) + Weak Analysis`);
-                        summaryLines.push(`  SELL ${holding.ticker}: time exit (>3d red) + weak analysis`);
-                        const fresh = await getPortfolioStatus();
-                        await updatePortfolioStatus(
-                            fresh.cash_balance + (holding.shares * price),
-                            fresh.total_equity - (price * holding.shares)
-                        );
-                        totalEquity -= price * holding.shares;
-                        continue;
-                    }
-                }
+        try {
+            const price = await MarketDataService.getCurrentPrice(holding.ticker);
+            if (price) {
+                totalEquity += price * holding.shares;
+                await updateHoldingPrice(holding.ticker, price).catch(() => { });
+                // Always update high water mark for trailing stop
+                await updateHighWaterMark(holding.ticker, price).catch(() => { });
+            } else {
+                totalEquity += holding.market_value;
             }
-        } else {
+        } catch (e) {
+            console.error(`[Engine] Price sync failed for ${holding.ticker}`, e);
             totalEquity += holding.market_value;
         }
     }
 
-    // Update Global Status
+    // Update global status
     const status = await getPortfolioStatus();
     await updatePortfolioStatus(status.cash_balance, totalEquity);
 
-    // 2. Enhanced Sell Logic (runs at OPEN, MID, and CLOSE for more opportunities)
-    const currentHoldings = await getHoldings();
+    // ── 2. Sell Logic: Trail Stops, Partial Profits, Signals ──
+    const currentHoldings = await getHoldings(); // re-fetch after price sync
     for (const holding of currentHoldings) {
-        const signal = await analyzeTicker(holding.ticker);
+        const price = holding.current_price;
+        if (!price || price <= 0) continue;
 
-        // Save Analysis Result (so cloud status updates)
-        try {
-            await saveAnalysisResult({
-                ticker: holding.ticker,
-                action: signal.action,
-                confidence: signal.confidence,
-                reason: signal.reason,
-                sentimentScore: signal.sentimentBoost ? signal.sentimentBoost / 10 : undefined,
-                sentimentConfidence: signal.sentimentBoost ? Math.abs(signal.sentimentBoost) / 10 : undefined,
-                rsi: signal.indicators?.rsi,
-                macdHistogram: signal.indicators?.macdHistogram,
-                volumeRatio: signal.indicators?.volumeRatio,
-                priceChangePct: signal.indicators?.priceChangePct,
-                sma50: signal.indicators?.sma50,
-                sma200: signal.indicators?.sma200
-            });
-        } catch (e) { console.error(`Failed to save analysis for ${holding.ticker}`, e); }
-        summaryLines.push(`  ${holding.ticker}: ${signal.action} (${signal.confidence}%) - ${signal.reason}`);
-        // Lower threshold: 65% (was 70%) for more frequent sells
-        if (signal.action === 'SELL' && signal.confidence >= 65) {
+        const returnPct = ((price - holding.avg_cost) / holding.avg_cost) * 100;
+        const daysHeld = holding.opened_at
+            ? (Date.now() - new Date(holding.opened_at).getTime()) / (1000 * 60 * 60 * 24)
+            : 0;
+
+        // ─── 2a. ATR-Based Trailing Stop ───
+        // If no ATR stored, fall back to a percentage-based stop
+        const atr = holding.atr || (holding.avg_cost * 0.02); // fallback: 2% of cost
+        const trailDistance = 2.0 * atr;
+        const hwm = holding.high_water_mark || holding.avg_cost;
+        const trailStopPrice = hwm - trailDistance;
+
+        if (price < trailStopPrice && returnPct < -1) {
+            // Only trigger if we're actually losing money (not just below HWM due to ATR width)
+            const sellShares = holding.shares;
+            await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                `Trailing Stop: Price $${price.toFixed(2)} < Trail $${trailStopPrice.toFixed(2)} (HWM $${hwm.toFixed(2)}, ATR $${atr.toFixed(2)})`);
+            summaryLines.push(`  SELL ${holding.ticker}: trailing stop (${returnPct.toFixed(1)}%)`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
+            totalEquity -= sellShares * price;
+            continue;
+        }
+
+        // ─── 2b. Scaled Partial Profit Taking ───
+        const partialSells = holding.partial_sells || 0;
+
+        // +5% → sell 33% (first partial)
+        if (returnPct >= 5 && partialSells === 0 && holding.shares > 1) {
+            const sellShares = Math.max(1, Math.floor(holding.shares * 0.33));
+            await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                `Partial Profit +5% (1/3 position, ${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +5% lock 33%`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
+            totalEquity -= sellShares * price;
+            continue; // let the next cycle handle the remaining shares
+        }
+
+        // +10% → sell another 33% (second partial)
+        if (returnPct >= 10 && partialSells === 1 && holding.shares > 1) {
+            const sellShares = Math.max(1, Math.floor(holding.shares * 0.5)); // 50% of remaining ≈ 33% original
+            await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                `Partial Profit +10% (2/3 position, ${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +10% lock 50% remaining`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
+            totalEquity -= sellShares * price;
+            continue;
+        }
+
+        // +15% or more → sell remaining (full exit)
+        if (returnPct >= 15 && partialSells >= 2) {
+            await executeTrade(holding.ticker, 'SELL', holding.shares, price,
+                `Full Profit Exit +15% (${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  SELL ${holding.ticker}: full exit at +15%`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
+            totalEquity -= holding.shares * price;
+            continue;
+        }
+
+        // ─── 2c. ADX Trend Death + Time Exit ───
+        // If held > 2 days, trend is dying (ADX < 15), and position is flat/red → exit
+        if (daysHeld > 2 && returnPct < 1) {
+            const signal = await analyzeTicker(holding.ticker);
+            const adx = signal.indicators?.adx ?? 25;
+
+            if (adx < 15 || (signal.action === 'SELL' && signal.confidence >= 60)) {
+                await executeTrade(holding.ticker, 'SELL', holding.shares, price,
+                    `Trend Exit: ADX ${adx.toFixed(0)}, ${daysHeld.toFixed(1)}d held, ${returnPct.toFixed(1)}%`);
+                summaryLines.push(`  SELL ${holding.ticker}: trend died (ADX ${adx.toFixed(0)}, ${daysHeld.toFixed(1)}d)`);
+                const fresh = await getPortfolioStatus();
+                await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
+                totalEquity -= holding.shares * price;
+                continue;
+            }
+        }
+
+        // ─── 2d. Full Analysis Sell Signal ───
+        // Only run full analysis if not already handled above
+        if (type !== 'PORTFOLIO_CHECK' || daysHeld > 1) {
+            const signal = await analyzeTicker(holding.ticker);
             try {
-                const currentPrice = await MarketDataService.getCurrentPrice(holding.ticker);
-                if (currentPrice) {
-                    await executeTrade(holding.ticker, 'SELL', holding.shares, currentPrice, signal.reason);
-                    summaryLines.push(`  -> SELL executed ${holding.ticker}`);
-                    const freshStatus = await getPortfolioStatus();
-                    await updatePortfolioStatus(
-                        freshStatus.cash_balance + (holding.shares * currentPrice),
-                        freshStatus.total_equity - (holding.shares * currentPrice)
-                    );
-                }
-            } catch (e) { console.error(e); }
+                await saveAnalysisResult({
+                    ticker: holding.ticker, action: signal.action,
+                    confidence: signal.confidence, reason: signal.reason,
+                    sentimentScore: signal.sentimentBoost ? signal.sentimentBoost / 10 : undefined,
+                    sentimentConfidence: signal.sentimentBoost ? Math.abs(signal.sentimentBoost) / 10 : undefined,
+                    rsi: signal.indicators?.rsi, macdHistogram: signal.indicators?.macdHistogram,
+                    volumeRatio: signal.indicators?.volumeRatio, priceChangePct: signal.indicators?.priceChangePct,
+                    sma50: signal.indicators?.sma50, sma200: signal.indicators?.sma200,
+                });
+            } catch (e) { console.error(`Failed to save analysis for ${holding.ticker}`, e); }
+
+            summaryLines.push(`  ${holding.ticker}: ${signal.action} (${signal.confidence}%) - ${signal.reason}`);
+
+            if (signal.action === 'SELL' && signal.confidence >= 60) {
+                try {
+                    const currentPrice = await MarketDataService.getCurrentPrice(holding.ticker);
+                    if (currentPrice) {
+                        await executeTrade(holding.ticker, 'SELL', holding.shares, currentPrice, signal.reason);
+                        summaryLines.push(`  -> SELL executed ${holding.ticker}`);
+                        const freshStatus = await getPortfolioStatus();
+                        await updatePortfolioStatus(
+                            freshStatus.cash_balance + (holding.shares * currentPrice),
+                            totalEquity - (holding.shares * currentPrice)
+                        );
+                        totalEquity -= holding.shares * currentPrice;
+                    }
+                } catch (e) { console.error(e); }
+            }
         }
     }
 
-    // Heartbeat so cloud status widget shows last run even when there are no holdings
+    // Heartbeat
     try {
         await saveAnalysisResult({
-            ticker: '_cycle',
-            action: 'HOLD',
-            confidence: 0,
+            ticker: '_cycle', action: 'HOLD', confidence: 0,
             reason: `Cycle ${type} completed`,
         });
     } catch (e) { console.error('Heartbeat save failed', e); }
 
-    // 3. Buy Logic: only on OPEN/MID/CLOSE (skip on PORTFOLIO_CHECK)
+    // ── 3. Buy Logic (OPEN/MID/CLOSE only) ──
     if (isPortfolioOnly) {
         summaryLines.push('PORTFOLIO_CHECK: no buy scan.');
         try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
-        console.log('PORTFOLIO_CHECK: skipping buy scan.');
+        console.log('[Engine] PORTFOLIO_CHECK complete, skipping buy scan.');
         return;
     }
 
     const freshStatus = await getPortfolioStatus();
     const updatedHoldings = await getHoldings();
 
-    // Max 10 positions, min $3k cash. Buy at most 1–2 per cycle for stable ~5% weekly ROI.
+    // Dynamic cash floor: 10% of total portfolio value (min $500)
+    const cashFloor = Math.max(500, freshStatus.total_value * 0.10);
     const MAX_POSITIONS = 10;
+    const MAX_BUYS_PER_CYCLE = 4;
+
     const candidates = await getBuyCandidates();
     const top5 = candidates.slice(0, 5);
 
-    if (freshStatus.cash_balance <= 3000 || updatedHoldings.length >= MAX_POSITIONS) {
-        summaryLines.push(`No buy: ${freshStatus.cash_balance <= 3000 ? 'cash ≤ $3k' : 'max positions (10)'}. Top 5 rejected:`);
+    if (freshStatus.cash_balance <= cashFloor || updatedHoldings.length >= MAX_POSITIONS) {
+        summaryLines.push(`No buy: ${freshStatus.cash_balance <= cashFloor ? `cash ≤ floor $${cashFloor.toFixed(0)}` : 'max positions (10)'}. Top 5:`);
         for (const c of top5) {
-            const reason = freshStatus.cash_balance <= 3000 ? 'low cash' : 'at max positions';
-            summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${reason}`);
+            summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${freshStatus.cash_balance <= cashFloor ? 'low cash' : 'at max positions'}`);
         }
         try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
-        console.log('Trading Cycle Completed');
+        console.log('[Engine] Trading Cycle Completed (no buys)');
         return;
     }
 
     let bought: string[] = [];
-    for (const candidate of candidates.slice(0, 2)) {
+    let buyCount = 0;
+
+    for (const candidate of candidates) {
+        if (buyCount >= MAX_BUYS_PER_CYCLE) break;
+
+        // Skip if already holding
         if (updatedHoldings.find(h => h.ticker === candidate.ticker)) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
-                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - already holding (rejected)`);
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - already holding (skip)`);
             }
             continue;
         }
 
-        const baseSize = freshStatus.total_value * 0.1;
-        const confidenceMultiplier = candidate.confidence / 100;
-        const positionSize = Math.min(
-            baseSize * (0.8 + confidenceMultiplier * 0.4),
-            freshStatus.cash_balance * 0.7
+        // ─── Dynamic Position Sizing ───
+        const positionSize = calculatePositionSize(
+            candidate.confidence,
+            candidate.indicators?.atr || 0,
+            freshStatus.total_value,
+            freshStatus.cash_balance,
+            updatedHoldings.length + buyCount
         );
 
-        if (positionSize < 1000) {
+        if (positionSize < 500) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
-                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - position size < $1000 (rejected)`);
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - position too small $${positionSize.toFixed(0)} (skip)`);
             }
             continue;
         }
 
-        if (candidate.confidence < 68) {
+        // Confidence gate: 65% minimum
+        if (candidate.confidence < 65) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
-                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - below 68% buy threshold (rejected)`);
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - below 65% threshold (skip)`);
             }
             continue;
         }
+
+        // Don't spend more than available - cashFloor
+        const maxSpend = freshStatus.cash_balance - cashFloor;
+        const actualSize = Math.min(positionSize, maxSpend);
+        if (actualSize < 500) continue;
 
         try {
             const currentPrice = await MarketDataService.getCurrentPrice(candidate.ticker);
-
-            if (currentPrice) {
-                const shares = Math.floor(positionSize / currentPrice);
-
+            if (currentPrice && currentPrice > 0) {
+                const shares = Math.floor(actualSize / currentPrice);
                 if (shares > 0) {
-                    await executeTrade(candidate.ticker, 'BUY', shares, currentPrice, candidate.reason);
-                    bought.push(`${candidate.ticker} (${shares} shares)`);
+                    await executeTrade(
+                        candidate.ticker, 'BUY', shares, currentPrice,
+                        candidate.reason,
+                        { atr: candidate.indicators?.atr || 0 }
+                    );
+                    bought.push(`${candidate.ticker} (${shares}×$${currentPrice.toFixed(2)}, conf ${candidate.confidence}%)`);
                     const postBuyStatus = await getPortfolioStatus();
                     await updatePortfolioStatus(
                         postBuyStatus.cash_balance - (shares * currentPrice),
                         postBuyStatus.total_equity + (shares * currentPrice)
                     );
+                    buyCount++;
                 }
             }
         } catch (e) { console.error(e); }
@@ -261,11 +335,11 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     if (bought.length) summaryLines.push('Bought: ' + bought.join(', '));
     else if (top5.length) {
-        summaryLines.push('Top 5 candidates not bought:');
+        summaryLines.push('Top candidates not bought:');
         for (const c of top5) {
             const why = updatedHoldings.find(h => h.ticker === c.ticker) ? 'already holding'
-                : c.confidence < 68 ? `confidence ${c.confidence}% < 68%`
-                    : 'position size or other';
+                : c.confidence < 65 ? `confidence ${c.confidence}% < 65%`
+                    : 'position size or cash';
             summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${why}`);
         }
     }
@@ -276,58 +350,96 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     if (type === 'CLOSE') {
         try {
             await saveHistorySnapshot();
-            console.log('EOD Portfolio history snapshot saved.');
+            console.log('[Engine] EOD portfolio history snapshot saved.');
         } catch (e) { console.error('Failed to save daily history snapshot', e); }
     }
 
-    console.log('Trading Cycle Completed');
+    console.log('[Engine] Trading Cycle Completed');
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// DYNAMIC POSITION SIZING
+// ══════════════════════════════════════════════════════════════════════
+
 /**
- * Filter Candidates (Enhanced with more flexibility)
- * Strategy: Slightly relaxed fundamentals + Enhanced technicals + Sentiment
+ * Calculate position size based on confidence, volatility, portfolio state.
+ *
+ * - 65-75% confidence → 5% of portfolio
+ * - 75-85% confidence → 8% of portfolio
+ * - 85-95% confidence → 12% of portfolio
+ *
+ * Adjusted by: existing positions count, available cash ratio, ATR risk.
  */
+function calculatePositionSize(
+    confidence: number,
+    atr: number,
+    totalValue: number,
+    cashAvailable: number,
+    currentPositions: number
+): number {
+    // Base allocation percentage by confidence tier
+    let basePct: number;
+    if (confidence >= 85) basePct = 0.12;
+    else if (confidence >= 75) basePct = 0.08;
+    else basePct = 0.05;
+
+    let size = totalValue * basePct;
+
+    // Scale down as positions increase (diversification pressure)
+    // At 5 positions, reduce by 20%; at 8, reduce by 40%
+    const positionPenalty = Math.max(0.6, 1 - (currentPositions * 0.05));
+    size *= positionPenalty;
+
+    // Never use more than 40% of remaining cash on a single position
+    size = Math.min(size, cashAvailable * 0.40);
+
+    // ATR risk adjustment: if stock is very volatile, reduce position
+    // ATR as % of price > 4% → cut position 30%
+    if (atr > 0 && totalValue > 0) {
+        const atrPctOfSize = (atr / (size || 1)) * 100;
+        if (atrPctOfSize > 4) {
+            size *= 0.7;
+        }
+    }
+
+    return Math.max(0, size);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// BUY CANDIDATE SCREENING
+// ══════════════════════════════════════════════════════════════════════
+
 async function getBuyCandidates(): Promise<TradeSignal[]> {
     const db = getPool();
 
-    // 1. Fetch exactly the 20 Monitored Prospects (updated a few times a day by global scan)
-    const query = `
-    SELECT ticker 
-    FROM monitored_prospects 
-    ORDER BY score DESC
-  `;
-
+    // Fetch monitored prospects (updated by external scan)
+    const query = `SELECT ticker FROM monitored_prospects ORDER BY score DESC`;
     const result = await db.query(query);
     const signals: TradeSignal[] = [];
 
-    // 2. Enhanced Technical Analysis + Sentiment on top candidates
     for (const row of result.rows) {
-        const analysis = await analyzeTicker(row.ticker);
+        const analysis = await analyzeTicker((row as any).ticker);
 
-        // Save Analysis Result (so cloud status updates)
         try {
             await saveAnalysisResult({
-                ticker: row.ticker,
-                action: analysis.action,
-                confidence: analysis.confidence,
+                ticker: (row as any).ticker,
+                action: analysis.action, confidence: analysis.confidence,
                 reason: analysis.reason,
                 sentimentScore: analysis.sentimentBoost ? analysis.sentimentBoost / 10 : undefined,
                 sentimentConfidence: analysis.sentimentBoost ? Math.abs(analysis.sentimentBoost) / 10 : undefined,
-                rsi: analysis.indicators?.rsi,
-                macdHistogram: analysis.indicators?.macdHistogram,
-                volumeRatio: analysis.indicators?.volumeRatio,
-                priceChangePct: analysis.indicators?.priceChangePct,
-                sma50: analysis.indicators?.sma50,
-                sma200: analysis.indicators?.sma200
+                rsi: analysis.indicators?.rsi, macdHistogram: analysis.indicators?.macdHistogram,
+                volumeRatio: analysis.indicators?.volumeRatio, priceChangePct: analysis.indicators?.priceChangePct,
+                sma50: analysis.indicators?.sma50, sma200: analysis.indicators?.sma200,
             });
-        } catch (e) { console.error(`Failed to save analysis for ${row.ticker}`, e); }
+        } catch (e) { console.error(`Failed to save analysis for ${(row as any).ticker}`, e); }
 
-        // Lower threshold: 68% (was 75%) for more buy opportunities
-        if (analysis.action === 'BUY' && analysis.confidence >= 68) {
+        // Lower threshold: 65% (was 68%) for more buy opportunities
+        if (analysis.action === 'BUY' && analysis.confidence >= 65) {
             signals.push(analysis);
         }
     }
 
+    // Sort by total confidence (including sentiment boost)
     return signals.sort((a, b) => {
         const totalA = a.confidence + (a.sentimentBoost || 0);
         const totalB = b.confidence + (b.sentimentBoost || 0);
@@ -335,10 +447,10 @@ async function getBuyCandidates(): Promise<TradeSignal[]> {
     });
 }
 
-/**
- * Get historical context from Turso (5-day snapshots + intraday bars).
- * Used to enhance buy/sell/hold with RVOL + VWAP when available.
- */
+// ══════════════════════════════════════════════════════════════════════
+// HISTORICAL CONTEXT (Turso RVOL + VWAP)
+// ══════════════════════════════════════════════════════════════════════
+
 async function getHistoricalContext(ticker: string): Promise<{ rvol: number; vwap: number } | null> {
     try {
         const [snapshots, intraday] = await Promise.all([
@@ -356,14 +468,19 @@ async function getHistoricalContext(ticker: string): Promise<{ rvol: number; vwa
     }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// TICKER ANALYSIS (Enhanced with ATR, ADX, StochRSI, OBV)
+// ══════════════════════════════════════════════════════════════════════
+
 /**
- * Analyze a Single Ticker (Enhanced with MACD, Volume, Bollinger Bands, Sentiment, RVOL, VWAP)
+ * Analyze a single ticker with enhanced indicator suite.
+ * Uses: EMA10/50, RSI, MACD, Bollinger Bands, ATR, ADX, StochRSI, OBV,
+ *       RVOL, VWAP, Sentiment, Macro (FRED VIX), Fundamentals (FMP).
  */
 export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
     try {
         const quotes = await MarketDataService.getDailyCandles(ticker, 200);
-
-        if (quotes.length < 50) return { ticker, action: 'HOLD', reason: 'Not enough data', confidence: 0 }; // Need at least 50 for SMA50
+        if (quotes.length < 50) return { ticker, action: 'HOLD', reason: 'Not enough data', confidence: 0 };
 
         const current = quotes[quotes.length - 1];
         const closes = quotes.map((q: any) => q.close || 0);
@@ -371,238 +488,283 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
         const highs = quotes.map((q: any) => q.high || q.close || 0);
         const lows = quotes.map((q: any) => q.low || q.close || 0);
 
-        // Calculate all technical indicators
-        const indicators = calculateIndicators(closes, volumes, highs, lows);
+        const ind = calculateIndicators(closes, volumes, highs, lows);
 
-        // Historical context from Turso (RVOL, VWAP)
+        // Historical context (RVOL, VWAP)
         const hist = await getHistoricalContext(ticker);
-        const rvol = hist?.rvol ?? indicators.volumeRatio;
+        const rvol = hist?.rvol ?? ind.volumeRatio;
         const vwap = hist?.vwap ?? 0;
         const priceAboveVwap = vwap > 0 && current.close > vwap;
 
-        // Get sentiment (async, but we'll use it to boost confidence)
+        // Sentiment
         const sentiment = await getSentimentScore(ticker);
-        const sentimentBoost = sentiment.score * 10 * sentiment.confidence; // -10 to +10 boost
+        const sentimentBoost = sentiment.score * 10 * sentiment.confidence;
 
-        // Enhanced Buy Logic
+        // Helper to build indicator object
+        const makeIndicators = () => ({
+            rsi: ind.rsi,
+            macdHistogram: ind.macd.histogram,
+            volumeRatio: ind.volumeRatio,
+            priceChangePct: ind.priceChange,
+            sma50: ind.ema10,
+            sma200: ind.ema50,
+            rvol,
+            vwap: vwap || undefined,
+            atr: ind.atr,
+            adx: ind.adx,
+            stochRsi: ind.stochRsi,
+            obv: ind.obvTrend,
+        });
+
+        // ═══════ BUY SIGNAL ANALYSIS ═══════
         const buySignals: string[] = [];
         let buyConfidence = 0;
 
-        // 1. Trend Analysis (EMA 10/50)
-        // Strong Uptrend: Price > EMA10 > EMA50
-        const isUptrend = indicators.sma50 > indicators.sma200; // actually EMA10 > EMA50
-        const priceAboveTrend = current.close > indicators.sma200; // Price > EMA50
+        // 1. Trend: EMA10 > EMA50 and price > EMA50
+        const isUptrend = ind.ema10 > ind.ema50;
+        const priceAboveTrend = current.close > ind.ema50;
 
         if (isUptrend && priceAboveTrend) {
-            // 2. RSI Analysis (Dip Buying in Uptrend)
-            if (indicators.rsi < 45) {
-                buyConfidence += 30; // High confidence for dip buy
-                buySignals.push(`RSI ${Math.round(indicators.rsi)} (Dip in Uptrend)`);
-            } else if (indicators.rsi < 55 && current.close > indicators.sma50) {
-                // Momentum buy: RSI not overbought, price above EMA10
+            // 2. ADX Trend Strength (must confirm a real trend)
+            if (ind.adx > 20) {
                 buyConfidence += 15;
-                buySignals.push(`Momentum (Price > EMA10, RSI ${Math.round(indicators.rsi)})`);
+                buySignals.push(`ADX ${ind.adx.toFixed(0)} (trend confirmed)`);
+            } else if (ind.adx > 15) {
+                buyConfidence += 5;
+                buySignals.push(`ADX ${ind.adx.toFixed(0)} (weak trend)`);
+            } else {
+                // ADX < 15 = choppy, skip buying
+                return {
+                    ticker, action: 'HOLD',
+                    reason: `ADX too low (${ind.adx.toFixed(0)}) — choppy market`,
+                    confidence: 30, indicators: makeIndicators(),
+                };
             }
 
-            // 3. MACD Analysis
-            if (indicators.macd.histogram > 0 && indicators.macd.macd > indicators.macd.signal) {
+            // 3. RSI Dip Buy in Uptrend
+            if (ind.rsi < 40) {
+                buyConfidence += 25;
+                buySignals.push(`RSI ${Math.round(ind.rsi)} (oversold dip buy)`);
+            } else if (ind.rsi < 50 && current.close > ind.ema10) {
+                buyConfidence += 15;
+                buySignals.push(`RSI ${Math.round(ind.rsi)} (momentum pullback)`);
+            } else if (ind.rsi < 60) {
+                buyConfidence += 5;
+                buySignals.push(`RSI ${Math.round(ind.rsi)} (neutral)`);
+            }
+
+            // 4. StochRSI Cross-Up (buy timing)
+            if (ind.stochRsi < 30) {
                 buyConfidence += 20;
-                buySignals.push('MACD bullish');
+                buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (oversold bounce)`);
+            } else if (ind.stochRsi < 50) {
+                buyConfidence += 8;
+                buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)}`);
             }
 
-            // 4. Volume Confirmation
-            if (indicators.volumeRatio > 1.2) {
+            // 5. MACD Bullish
+            if (ind.macd.histogram > 0 && ind.macd.macd > ind.macd.signal) {
                 buyConfidence += 15;
-                buySignals.push(`Volume +${Math.round((indicators.volumeRatio - 1) * 100)}%`);
-            }
-
-            // 4b. RVOL from Turso (relative to 30d avg) — unusual volume = potential breakout
-            if (rvol > 1.5) {
-                buyConfidence += 12;
-                buySignals.push(`RVOL ${rvol.toFixed(1)}x (unusual volume)`);
-            } else if (rvol > 1.2) {
+                buySignals.push('MACD bullish');
+            } else if (ind.macd.histogram > 0) {
                 buyConfidence += 5;
             }
-            // 4c. Price above VWAP = bullish intraday
+
+            // 6. Volume Confirmation
+            if (ind.volumeRatio > 1.3) {
+                buyConfidence += 12;
+                buySignals.push(`Volume +${Math.round((ind.volumeRatio - 1) * 100)}%`);
+            } else if (ind.volumeRatio > 1.1) {
+                buyConfidence += 5;
+            }
+
+            // 7. RVOL (relative volume from Turso)
+            if (rvol > 1.5) {
+                buyConfidence += 10;
+                buySignals.push(`RVOL ${rvol.toFixed(1)}x`);
+            } else if (rvol > 1.2) {
+                buyConfidence += 4;
+            }
+
+            // 8. VWAP
             if (priceAboveVwap) {
-                buyConfidence += 8;
+                buyConfidence += 6;
                 buySignals.push('Price > VWAP');
             }
 
-            // 5. Bollinger Bands (buy near lower band in uptrend)
-            const bbPosition = (current.close - indicators.bollingerBands.lower) /
-                (indicators.bollingerBands.upper - indicators.bollingerBands.lower);
-            if (bbPosition < 0.3 && isUptrend) {
-                buyConfidence += 15;
-                buySignals.push('Near BB lower band');
+            // 9. OBV Accumulation
+            if (ind.obvTrend > 0) {
+                buyConfidence += 8;
+                buySignals.push('OBV accumulation');
             }
 
-            // 6. Momentum (price change)
-            if (indicators.priceChange > 5) {
-                buyConfidence += 10;
-                buySignals.push(`+${indicators.priceChange.toFixed(1)}% momentum`);
+            // 10. Bollinger Band position (buy near lower in uptrend)
+            const bbRange = ind.bollingerBands.upper - ind.bollingerBands.lower;
+            if (bbRange > 0) {
+                const bbPosition = (current.close - ind.bollingerBands.lower) / bbRange;
+                if (bbPosition < 0.3 && isUptrend) {
+                    buyConfidence += 12;
+                    buySignals.push('Near BB lower band');
+                }
             }
 
-            // 7. Sentiment Boost
+            // 11. Price Momentum
+            if (ind.priceChange > 5) {
+                buyConfidence += 8;
+                buySignals.push(`+${ind.priceChange.toFixed(1)}% momentum`);
+            } else if (ind.priceChange > 2) {
+                buyConfidence += 3;
+            }
+
+            // 12. Sentiment
             if (sentiment.score > 0.2 && sentiment.confidence > 0.5) {
-                buyConfidence += Math.min(10, sentiment.score * 15);
-                buySignals.push(`Positive sentiment`);
+                const boost = Math.min(10, sentiment.score * 15);
+                buyConfidence += boost;
+                buySignals.push(`Positive sentiment (+${boost.toFixed(0)})`);
             }
 
-            if (buyConfidence >= 68) { // Lower threshold for more opportunities
-
-                // --- 8. FRED Macro Economic Check ---
-                // We only do this check when ready to buy to minimize API calls
+            // ─── Gate: only proceed to macro/fundamental checks if strong enough ───
+            if (buyConfidence >= 65) {
+                // Macro check (FRED VIX)
                 const macro = await MarketDataService.getMacroTrend();
                 if (!macro.safeToTrade) {
                     return {
-                        ticker,
-                        action: 'HOLD',
+                        ticker, action: 'HOLD',
                         reason: `Macro Block: ${macro.reason} (Setup was ${buyConfidence}%)`,
-                        confidence: 0
+                        confidence: 0,
                     };
                 }
 
-                // --- 9. Massive.com (FMP) Financials Deep Dive ---
-                // We only check if financials are safe after passing technicals & macro
+                // Fundamental check (FMP)
                 const fins = await MarketDataService.getDeepFinancials(ticker);
-                if (fins && fins.financials && fins.financials.income_statement) {
-                    const netIncomeNode = fins.financials.income_statement.net_income_loss;
-                    const netIncome = netIncomeNode ? netIncomeNode.value : null;
-                    if (netIncome !== null && netIncome < 0) {
-                        buySignals.push('Warning: Negative Net Income');
-                        buyConfidence = Math.max(0, buyConfidence - 15); // penalize sharply
-                    } else if (netIncome !== null && netIncome > 0) {
+                if (fins?.financials?.income_statement) {
+                    const netIncome = fins.financials.income_statement.net_income_loss?.value;
+                    if (netIncome !== null && netIncome !== undefined && netIncome < 0) {
+                        buySignals.push('⚠ Negative Net Income');
+                        buyConfidence = Math.max(0, buyConfidence - 12);
+                    } else if (netIncome !== null && netIncome !== undefined && netIncome > 0) {
                         buySignals.push('Positive GAAP Income');
-                        buyConfidence += 5;
+                        buyConfidence += 4;
                     }
                 }
 
-                // Final re-check of confidence after FMP 
-                const finalAction = buyConfidence >= 68 ? 'BUY' : 'HOLD';
-
+                const finalAction = buyConfidence >= 65 ? 'BUY' : 'HOLD';
                 return {
-                    ticker,
-                    action: finalAction,
+                    ticker, action: finalAction,
                     reason: buySignals.join(', '),
                     confidence: Math.min(95, buyConfidence),
                     sentimentBoost,
-                    indicators: {
-                        rsi: indicators.rsi,
-                        macdHistogram: indicators.macd.histogram,
-                        volumeRatio: indicators.volumeRatio,
-                        priceChangePct: indicators.priceChange,
-                        sma50: indicators.sma50,
-                        sma200: indicators.sma200,
-                        rvol,
-                        vwap: vwap || undefined
-                    }
+                    indicators: makeIndicators(),
                 };
             }
         }
 
-        // Enhanced Sell Logic
+        // ═══════ SELL SIGNAL ANALYSIS ═══════
         const sellSignals: string[] = [];
         let sellConfidence = 0;
 
-        const isDowntrend = indicators.sma50 < indicators.sma200 || current.close < indicators.sma200;
-        const isStrongDowntrend = indicators.sma50 < indicators.sma200 * 0.95 && current.close < indicators.sma50;
+        const isDowntrend = ind.ema10 < ind.ema50 || current.close < ind.ema50;
+        const isStrongDowntrend = ind.ema10 < ind.ema50 * 0.95 && current.close < ind.ema10;
 
         if (isDowntrend || isStrongDowntrend) {
             // RSI Overbought in downtrend
-            if (indicators.rsi > 65) { // Lowered from 70
-                sellConfidence += 30;
-                sellSignals.push(`RSI ${Math.round(indicators.rsi)} (overbought)`);
+            if (ind.rsi > 65) {
+                sellConfidence += 25;
+                sellSignals.push(`RSI ${Math.round(ind.rsi)} (overbought in downtrend)`);
             }
 
             // MACD Bearish
-            if (indicators.macd.histogram < 0 && indicators.macd.macd < indicators.macd.signal) {
-                sellConfidence += 25;
+            if (ind.macd.histogram < 0 && ind.macd.macd < ind.macd.signal) {
+                sellConfidence += 20;
                 sellSignals.push('MACD bearish');
             }
 
-            // Death Cross (SMA50 crossing below SMA200)
-            if (indicators.sma50 < indicators.sma200 &&
-                quotes.length >= 51 &&
-                quotes[quotes.length - 2].close) {
-                const prevSMA50 = quotes.slice(-51, -1).reduce((acc: number, q: any) => acc + (q.close || 0), 0) / 50;
-                const prevSMA200 = quotes.slice(-201, -1).reduce((acc: number, q: any) => acc + (q.close || 0), 0) / 200;
-                if (prevSMA50 >= prevSMA200 && indicators.sma50 < indicators.sma200) {
-                    sellConfidence += 20;
-                    sellSignals.push('Death cross');
+            // ADX Strong Downtrend
+            if (ind.adx > 25 && isStrongDowntrend) {
+                sellConfidence += 15;
+                sellSignals.push(`ADX ${ind.adx.toFixed(0)} (strong downtrend)`);
+            }
+
+            // StochRSI Overbought
+            if (ind.stochRsi > 80) {
+                sellConfidence += 10;
+                sellSignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (overbought)`);
+            }
+
+            // Death Cross
+            if (ind.ema10 < ind.ema50 && quotes.length >= 51) {
+                const prevCloses = closes.slice(0, -1);
+                const prevEma10 = calculateEMA(prevCloses, 10);
+                const prevEma50 = calculateEMA(prevCloses, 50);
+                if (prevEma10.length > 0 && prevEma50.length > 0) {
+                    const pe10 = prevEma10[prevEma10.length - 1];
+                    const pe50 = prevEma50[prevEma50.length - 1];
+                    if (pe10 >= pe50 && ind.ema10 < ind.ema50) {
+                        sellConfidence += 15;
+                        sellSignals.push('Death cross (EMA10 × EMA50)');
+                    }
                 }
             }
 
             // Negative sentiment
             if (sentiment.score < -0.2 && sentiment.confidence > 0.5) {
-                sellConfidence += 15;
+                sellConfidence += 12;
                 sellSignals.push('Negative sentiment');
             }
 
             // Volume spike on decline
-            if (indicators.volumeRatio > 1.5 && current.close < quotes[quotes.length - 2].close) {
+            if (ind.volumeRatio > 1.5 && current.close < (closes[closes.length - 2] || current.close)) {
                 sellConfidence += 10;
                 sellSignals.push('High volume decline');
             }
-            // Price below VWAP in downtrend = distribution
-            if (!priceAboveVwap && vwap > 0) {
+
+            // OBV Distribution
+            if (ind.obvTrend < 0) {
                 sellConfidence += 8;
+                sellSignals.push('OBV distribution');
+            }
+
+            // Price below VWAP
+            if (!priceAboveVwap && vwap > 0) {
+                sellConfidence += 6;
                 sellSignals.push('Price < VWAP');
             }
+
             // RVOL spike on decline
-            if (rvol > 1.5 && current.close < quotes[quotes.length - 2]?.close) {
-                sellConfidence += 7;
+            if (rvol > 1.5 && current.close < (closes[closes.length - 2] || current.close)) {
+                sellConfidence += 6;
                 sellSignals.push('RVOL spike on decline');
             }
 
-            if (sellConfidence >= 65) {
+            if (sellConfidence >= 60) {
                 return {
-                    ticker,
-                    action: 'SELL',
+                    ticker, action: 'SELL',
                     reason: sellSignals.join(', '),
                     confidence: Math.min(95, sellConfidence),
                     sentimentBoost,
-                    indicators: {
-                        rsi: indicators.rsi,
-                        macdHistogram: indicators.macd.histogram,
-                        volumeRatio: indicators.volumeRatio,
-                        priceChangePct: indicators.priceChange,
-                        sma50: indicators.sma50,
-                        sma200: indicators.sma200,
-                        rvol,
-                        vwap: vwap || undefined
-                    }
+                    indicators: makeIndicators(),
                 };
             }
         }
 
-        // Neutral/Hold
+        // ═══════ HOLD (Neutral) ═══════
         return {
-            ticker,
-            action: 'HOLD',
-            reason: `Neutral: RSI ${Math.round(indicators.rsi)}, Trend ${isUptrend ? 'Up' : 'Down'}`,
+            ticker, action: 'HOLD',
+            reason: `Neutral: RSI ${Math.round(ind.rsi)}, ADX ${ind.adx.toFixed(0)}, Trend ${isUptrend ? 'Up' : 'Down'}`,
             confidence: 50,
-            indicators: {
-                rsi: indicators.rsi,
-                macdHistogram: indicators.macd.histogram,
-                volumeRatio: indicators.volumeRatio,
-                priceChangePct: indicators.priceChange,
-                sma50: indicators.sma50,
-                sma200: indicators.sma200,
-                rvol,
-                vwap: vwap || undefined
-            }
+            indicators: makeIndicators(),
         };
 
     } catch (e) {
-        console.error(`[Trading] Error analyzing ${ticker}:`, e);
+        console.error(`[Engine] Error analyzing ${ticker}:`, e);
         return { ticker, action: 'HOLD', reason: 'Error', confidence: 0 };
     }
 }
 
-/**
- * Calculate all technical indicators
- */
+// ══════════════════════════════════════════════════════════════════════
+// TECHNICAL INDICATOR CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════
+
 function calculateIndicators(
     closes: number[],
     volumes: number[],
@@ -611,13 +773,13 @@ function calculateIndicators(
 ): TechnicalIndicators {
     const current = closes[closes.length - 1];
 
-    // EMA 10 & 50 (Faster trend detection)
+    // EMA 10 & 50
     const ema10Array = calculateEMA(closes, 10);
     const ema50Array = calculateEMA(closes, 50);
-    const sma50 = ema10Array[ema10Array.length - 1] || 0; // Using sma50 field for EMA10 to keep interface
-    const sma200 = ema50Array[ema50Array.length - 1] || 0; // Using sma200 field for EMA50
+    const ema10 = ema10Array[ema10Array.length - 1] || 0;
+    const ema50 = ema50Array[ema50Array.length - 1] || 0;
 
-    // RSI
+    // RSI (14)
     const rsi = calculateRSI(closes, 14);
 
     // MACD (12, 26, 9)
@@ -635,124 +797,192 @@ function calculateIndicators(
     const price20DaysAgo = closes[closes.length - 21] || current;
     const priceChange = ((current - price20DaysAgo) / price20DaysAgo) * 100;
 
-    return {
-        sma50,
-        sma200,
-        rsi,
-        macd,
-        volumeRatio,
-        bollingerBands,
-        priceChange
-    };
+    // ATR (14)
+    const atr = calculateATR(highs, lows, closes, 14);
+
+    // ADX (14)
+    const adx = calculateADX(highs, lows, closes, 14);
+
+    // Stochastic RSI (14, 14, 3, 3)
+    const stochRsi = calculateStochRSI(closes, 14, 14, 3);
+
+    // OBV Trend (positive = accumulation, negative = distribution)
+    const obvTrend = calculateOBVTrend(closes, volumes, 14);
+
+    return { ema10, ema50, rsi, macd, volumeRatio, bollingerBands, priceChange, atr, adx, stochRsi, obvTrend };
 }
 
-/**
- * Calculate MACD (Moving Average Convergence Divergence)
- */
-function calculateMACD(prices: number[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9): {
-    macd: number;
-    signal: number;
-    histogram: number;
-} {
-    if (prices.length < slowPeriod + signalPeriod) {
-        return { macd: 0, signal: 0, histogram: 0 };
-    }
-
-    // Calculate EMAs
-    const fastEMA = calculateEMA(prices, fastPeriod);
-    const slowEMA = calculateEMA(prices, slowPeriod);
-
-    // MACD line
-    const macdLine: number[] = [];
-    for (let i = 0; i < Math.min(fastEMA.length, slowEMA.length); i++) {
-        macdLine.push(fastEMA[i] - slowEMA[i]);
-    }
-
-    if (macdLine.length < signalPeriod) {
-        return { macd: 0, signal: 0, histogram: 0 };
-    }
-
-    // Signal line (EMA of MACD)
-    const signalLine = calculateEMA(macdLine, signalPeriod);
-
-    const macd = macdLine[macdLine.length - 1];
-    const signal = signalLine[signalLine.length - 1];
-    const histogram = macd - signal;
-
-    return { macd, signal, histogram };
-}
-
-/**
- * Calculate EMA (Exponential Moving Average)
- */
+// ── EMA ──
 function calculateEMA(prices: number[], period: number): number[] {
     if (prices.length < period) return [];
-
     const multiplier = 2 / (period + 1);
     const ema: number[] = [];
-
-    // Start with SMA
     let sum = 0;
-    for (let i = 0; i < period; i++) {
-        sum += prices[i];
-    }
+    for (let i = 0; i < period; i++) sum += prices[i];
     ema.push(sum / period);
-
-    // Calculate EMA for rest
     for (let i = period; i < prices.length; i++) {
         ema.push((prices[i] - ema[ema.length - 1]) * multiplier + ema[ema.length - 1]);
     }
-
     return ema;
 }
 
-/**
- * Calculate Bollinger Bands
- */
-function calculateBollingerBands(prices: number[], period: number, stdDev: number): {
-    upper: number;
-    middle: number;
-    lower: number;
-} {
-    if (prices.length < period) {
-        const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
-        return { upper: avg, middle: avg, lower: avg };
-    }
-
-    const slice = prices.slice(-period);
-    const middle = slice.reduce((a, b) => a + b, 0) / period;
-
-    // Calculate standard deviation
-    const variance = slice.reduce((sum, price) => sum + Math.pow(price - middle, 2), 0) / period;
-    const standardDev = Math.sqrt(variance);
-
-    return {
-        upper: middle + (standardDev * stdDev),
-        middle,
-        lower: middle - (standardDev * stdDev)
-    };
-}
-
+// ── RSI ──
 function calculateRSI(prices: number[], period: number = 14): number {
     if (prices.length < period + 1) return 50;
-
-    let gains = 0;
-    let losses = 0;
-
+    let gains = 0, losses = 0;
     for (let i = prices.length - period; i < prices.length; i++) {
         const diff = prices[i] - prices[i - 1];
         if (diff >= 0) gains += diff;
         else losses -= diff;
     }
-
     if (losses === 0) return 100;
-
     const rs = (gains / period) / (losses / period);
     return 100 - (100 / (1 + rs));
 }
 
+// ── MACD ──
+function calculateMACD(prices: number[], fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    if (prices.length < slowPeriod + signalPeriod) return { macd: 0, signal: 0, histogram: 0 };
+    const fastEMA = calculateEMA(prices, fastPeriod);
+    const slowEMA = calculateEMA(prices, slowPeriod);
+    const macdLine: number[] = [];
+    for (let i = 0; i < Math.min(fastEMA.length, slowEMA.length); i++) {
+        macdLine.push(fastEMA[i] - slowEMA[i]);
+    }
+    if (macdLine.length < signalPeriod) return { macd: 0, signal: 0, histogram: 0 };
+    const signalLine = calculateEMA(macdLine, signalPeriod);
+    const macd = macdLine[macdLine.length - 1];
+    const signal = signalLine[signalLine.length - 1];
+    return { macd, signal, histogram: macd - signal };
+}
+
+// ── Bollinger Bands ──
+function calculateBollingerBands(prices: number[], period: number, stdDev: number) {
+    if (prices.length < period) {
+        const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+        return { upper: avg, middle: avg, lower: avg };
+    }
+    const slice = prices.slice(-period);
+    const middle = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((sum, price) => sum + Math.pow(price - middle, 2), 0) / period;
+    const standardDev = Math.sqrt(variance);
+    return { upper: middle + standardDev * stdDev, middle, lower: middle - standardDev * stdDev };
+}
+
+// ── ATR (Average True Range) ──
+function calculateATR(highs: number[], lows: number[], closes: number[], period: number = 14): number {
+    if (highs.length < period + 1) return 0;
+    const trueRanges: number[] = [];
+    for (let i = 1; i < highs.length; i++) {
+        const hl = highs[i] - lows[i];
+        const hc = Math.abs(highs[i] - closes[i - 1]);
+        const lc = Math.abs(lows[i] - closes[i - 1]);
+        trueRanges.push(Math.max(hl, hc, lc));
+    }
+    // Use last `period` true ranges for ATR
+    const recent = trueRanges.slice(-period);
+    return recent.reduce((a, b) => a + b, 0) / recent.length;
+}
+
+// ── ADX (Average Directional Index) ──
+function calculateADX(highs: number[], lows: number[], closes: number[], period: number = 14): number {
+    if (highs.length < period * 2) return 25; // default neutral
+    const plusDM: number[] = [];
+    const minusDM: number[] = [];
+    const tr: number[] = [];
+
+    for (let i = 1; i < highs.length; i++) {
+        const upMove = highs[i] - highs[i - 1];
+        const downMove = lows[i - 1] - lows[i];
+        plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+        minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+        const hl = highs[i] - lows[i];
+        const hc = Math.abs(highs[i] - closes[i - 1]);
+        const lc = Math.abs(lows[i] - closes[i - 1]);
+        tr.push(Math.max(hl, hc, lc));
+    }
+
+    if (tr.length < period) return 25;
+
+    // Smoothed with EMA
+    const smoothTR = calculateEMA(tr, period);
+    const smoothPlusDM = calculateEMA(plusDM, period);
+    const smoothMinusDM = calculateEMA(minusDM, period);
+
+    if (smoothTR.length === 0) return 25;
+
+    const dx: number[] = [];
+    const len = Math.min(smoothTR.length, smoothPlusDM.length, smoothMinusDM.length);
+    for (let i = 0; i < len; i++) {
+        const atr = smoothTR[i];
+        if (atr === 0) { dx.push(0); continue; }
+        const pdi = (smoothPlusDM[i] / atr) * 100;
+        const mdi = (smoothMinusDM[i] / atr) * 100;
+        const sum = pdi + mdi;
+        dx.push(sum === 0 ? 0 : (Math.abs(pdi - mdi) / sum) * 100);
+    }
+
+    if (dx.length < period) return dx[dx.length - 1] || 25;
+    const adxLine = calculateEMA(dx, period);
+    return adxLine[adxLine.length - 1] || 25;
+}
+
+// ── Stochastic RSI ──
+function calculateStochRSI(prices: number[], rsiPeriod: number = 14, stochPeriod: number = 14, smoothK: number = 3): number {
+    if (prices.length < rsiPeriod + stochPeriod + smoothK) return 50;
+
+    // Calculate RSI for each point
+    const rsiValues: number[] = [];
+    for (let i = rsiPeriod + 1; i <= prices.length; i++) {
+        const slice = prices.slice(0, i);
+        rsiValues.push(calculateRSI(slice, rsiPeriod));
+    }
+
+    if (rsiValues.length < stochPeriod) return 50;
+
+    // Stochastic of RSI
+    const recentRSI = rsiValues.slice(-stochPeriod);
+    const minRSI = Math.min(...recentRSI);
+    const maxRSI = Math.max(...recentRSI);
+    const range = maxRSI - minRSI;
+    if (range === 0) return 50;
+
+    const currentRSI = recentRSI[recentRSI.length - 1];
+    const stochRSI = ((currentRSI - minRSI) / range) * 100;
+    return Math.max(0, Math.min(100, stochRSI));
+}
+
+// ── OBV Trend ──
+function calculateOBVTrend(closes: number[], volumes: number[], period: number = 14): number {
+    if (closes.length < period + 1) return 0;
+
+    // Calculate OBV
+    const obv: number[] = [0];
+    for (let i = 1; i < closes.length; i++) {
+        if (closes[i] > closes[i - 1]) obv.push(obv[obv.length - 1] + volumes[i]);
+        else if (closes[i] < closes[i - 1]) obv.push(obv[obv.length - 1] - volumes[i]);
+        else obv.push(obv[obv.length - 1]);
+    }
+
+    // Compare recent OBV EMA to older OBV EMA to determine trend
+    const recentOBV = obv.slice(-period);
+    const olderOBV = obv.slice(-(period * 2), -period);
+
+    if (olderOBV.length === 0) return 0;
+
+    const recentAvg = recentOBV.reduce((a, b) => a + b, 0) / recentOBV.length;
+    const olderAvg = olderOBV.reduce((a, b) => a + b, 0) / olderOBV.length;
+
+    // Normalize: positive = accumulation, negative = distribution
+    return recentAvg > olderAvg ? 1 : recentAvg < olderAvg ? -1 : 0;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// PORTFOLIO SYNC
+// ══════════════════════════════════════════════════════════════════════
+
 export async function syncPortfolioPrices() {
-    console.log(`Starting Portfolio Price Sync`);
+    console.log('[Engine] Starting Portfolio Price Sync');
     const holdings = await getHoldings();
     let totalEquity = 0;
 
@@ -762,6 +992,7 @@ export async function syncPortfolioPrices() {
             if (price) {
                 totalEquity += price * holding.shares;
                 await updateHoldingPrice(holding.ticker, price).catch(() => { });
+                await updateHighWaterMark(holding.ticker, price).catch(() => { });
             } else {
                 totalEquity += holding.market_value;
             }
