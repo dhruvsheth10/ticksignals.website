@@ -12,9 +12,9 @@
 
 # production
 /build
-/ORACLE_VM_CRONS.md
 # misc
 .DS_Store
+ORACLE_VM_CRONS.md
 *.pem
 
 # SSH keys
