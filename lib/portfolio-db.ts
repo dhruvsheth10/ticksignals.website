@@ -421,12 +421,17 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promis
               FROM portfolio_history ORDER BY date ASC LIMIT 30`,
         args: []
     });
-    const dailyPoints: PortfolioSnapshot[] = (histR.rows as any[]).map(row => ({
-        timestamp: row.date + 'T16:00:00Z', // EOD
-        total_value: row.total_value,
-        cash_balance: row.cash_balance,
-        equity_value: row.equity_value,
-    }));
+    const dailyPoints: PortfolioSnapshot[] = [];
+    for (const row of histR.rows as any[]) {
+        const ts = normalizeDateToISO(row.date);
+        if (!ts) continue; // skip unparseable dates
+        dailyPoints.push({
+            timestamp: ts,
+            total_value: row.total_value,
+            cash_balance: row.cash_balance,
+            equity_value: row.equity_value,
+        });
+    }
 
     // Append today's snapshots (sampled every 4 hours)
     const todayStart = new Date(now);
@@ -449,6 +454,56 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promis
     const todayDate = now.toISOString().slice(0, 10);
     const filteredDaily = dailyPoints.filter(p => !p.timestamp.startsWith(todayDate));
     return [...filteredDaily, ...todaySampled];
+}
+
+/**
+ * Normalize a date string from portfolio_history into a valid ISO timestamp.
+ * Handles: YYYY-MM-DD, MM/DD/YYYY, full ISO strings, and the old buggy YYYY-DD-MM format.
+ * Returns null if the date is completely unparseable.
+ */
+function normalizeDateToISO(dateStr: string): string | null {
+    if (!dateStr) return null;
+
+    // Already a full ISO timestamp (has T and/or Z)
+    if (dateStr.includes('T')) {
+        const d = new Date(dateStr.endsWith('Z') ? dateStr : dateStr + 'Z');
+        return isNaN(d.getTime()) ? null : d.toISOString();
+    }
+
+    // Slash-separated: MM/DD/YYYY
+    if (dateStr.includes('/')) {
+        const parts = dateStr.split('/');
+        if (parts.length === 3) {
+            const [m, d, y] = parts;
+            const iso = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T16:00:00Z`;
+            const date = new Date(iso);
+            return isNaN(date.getTime()) ? null : date.toISOString();
+        }
+        return null;
+    }
+
+    // Dash-separated: YYYY-MM-DD (standard) or possibly YYYY-DD-MM (old bug)
+    if (dateStr.includes('-')) {
+        const parts = dateStr.split('-');
+        if (parts.length === 3) {
+            let [a, b, c] = parts;
+            // Standard YYYY-MM-DD
+            let iso = `${a}-${b}-${c}T16:00:00Z`;
+            let date = new Date(iso);
+            if (!isNaN(date.getTime()) && date.getFullYear() > 2000) {
+                return date.toISOString();
+            }
+            // Try YYYY-DD-MM (swapped month/day from old bug)
+            iso = `${a}-${c}-${b}T16:00:00Z`;
+            date = new Date(iso);
+            if (!isNaN(date.getTime()) && date.getFullYear() > 2000) {
+                return date.toISOString();
+            }
+        }
+        return null;
+    }
+
+    return null;
 }
 
 /** Downsample snapshots to at most 1 per interval (in ms). Keeps first point per bucket + always keeps the last point. */

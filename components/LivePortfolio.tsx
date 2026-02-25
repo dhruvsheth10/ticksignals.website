@@ -185,7 +185,8 @@ const LivePortfolio = () => {
                                     <XAxis
                                         dataKey="date"
                                         tickFormatter={(str) => {
-                                            const d = new Date(str);
+                                            const d = parseDate(str);
+                                            if (isNaN(d.getTime())) return '';
                                             if (timeframe === '1D') {
                                                 return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
                                             }
@@ -208,7 +209,8 @@ const LivePortfolio = () => {
                                         itemStyle={{ color: '#10b981' }}
                                         formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString()}`, 'Value'] as [string, string]}
                                         labelFormatter={(label) => {
-                                            const d = new Date(label);
+                                            const d = parseDate(label);
+                                            if (isNaN(d.getTime())) return String(label);
                                             if (timeframe === '1D') {
                                                 return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
                                             }
