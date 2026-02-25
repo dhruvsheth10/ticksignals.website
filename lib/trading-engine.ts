@@ -1,6 +1,6 @@
 
 import { getPool } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot } from './portfolio-db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot, savePortfolioSnapshot, cleanupOldSnapshots } from './portfolio-db';
 import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
 
@@ -243,6 +243,8 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     if (isPortfolioOnly) {
         summaryLines.push('PORTFOLIO_CHECK: no buy scan.');
         try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
+        // Save high-frequency portfolio snapshot for chart
+        try { await savePortfolioSnapshot(); } catch (e) { console.error('savePortfolioSnapshot failed', e); }
         console.log('[Engine] PORTFOLIO_CHECK complete, skipping buy scan.');
         return;
     }
@@ -264,6 +266,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${freshStatus.cash_balance <= cashFloor ? 'low cash' : 'at max positions'}`);
         }
         try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
+        try { await savePortfolioSnapshot(); } catch (e) { console.error('savePortfolioSnapshot failed', e); }
         console.log('[Engine] Trading Cycle Completed (no buys)');
         return;
     }
@@ -346,12 +349,19 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     try { await saveCycleLog(type, summaryLines.join('\n')); } catch (e) { console.error('saveCycleLog failed', e); }
 
-    // Save EOD History
+    // Save high-frequency portfolio snapshot for chart
+    try { await savePortfolioSnapshot(); } catch (e) { console.error('savePortfolioSnapshot failed', e); }
+
+    // Save EOD History + cleanup
     if (type === 'CLOSE') {
         try {
             await saveHistorySnapshot();
             console.log('[Engine] EOD portfolio history snapshot saved.');
         } catch (e) { console.error('Failed to save daily history snapshot', e); }
+        try {
+            const cleaned = await cleanupOldSnapshots();
+            if (cleaned > 0) console.log(`[Engine] Cleaned ${cleaned} old portfolio snapshots.`);
+        } catch (e) { console.error('cleanupOldSnapshots failed', e); }
     }
 
     console.log('[Engine] Trading Cycle Completed');

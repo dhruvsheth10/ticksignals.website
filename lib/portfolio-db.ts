@@ -46,6 +46,13 @@ export interface PortfolioHistory {
     day_change_pct: number;
 }
 
+export interface PortfolioSnapshot {
+    timestamp: string;
+    total_value: number;
+    cash_balance: number;
+    equity_value: number;
+}
+
 export interface DailySnapshot {
     ticker: string;
     snapshot_at: string; // ISO
@@ -216,6 +223,18 @@ export async function initPortfolioTables(): Promise<void> {
       )
     `);
 
+    // High-frequency portfolio value snapshots (recorded every trading cycle)
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        total_value REAL NOT NULL,
+        cash_balance REAL NOT NULL,
+        equity_value REAL NOT NULL
+      )
+    `);
+    await db.execute(`CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_ts ON portfolio_snapshots(timestamp)`);
+
     console.log('Portfolio + trading tables (Turso) initialized.');
 }
 
@@ -334,6 +353,136 @@ export async function saveHistorySnapshot(): Promise<void> {
               VALUES (?, ?, ?, ?, ?)`,
         args: [etDateStr, status.total_value, status.cash_balance, status.total_equity, dayChange]
     });
+}
+
+/**
+ * Save a high-frequency portfolio snapshot (called every trading cycle).
+ * These power the intraday/weekly chart views.
+ */
+export async function savePortfolioSnapshot(): Promise<void> {
+    const db = getTurso();
+    const status = await getPortfolioStatus();
+    const now = new Date().toISOString();
+
+    await db.execute({
+        sql: `INSERT INTO portfolio_snapshots (timestamp, total_value, cash_balance, equity_value)
+              VALUES (?, ?, ?, ?)`,
+        args: [now, status.total_value, status.cash_balance, status.total_equity]
+    });
+}
+
+/**
+ * Get detailed portfolio history with variable granularity based on timeframe.
+ *   - 1D:  all snapshots from the last 24h (every cycle = ~20min intervals)
+ *   - 1W:  snapshots sampled roughly every hour for 7 days
+ *   - 30D: daily history (portfolio_history table) + today's snapshots appended
+ */
+export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promise<PortfolioSnapshot[]> {
+    const db = getTurso();
+    const now = new Date();
+
+    if (timeframe === '1D') {
+        // Last 24h — return all snapshots
+        const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+        const r = await db.execute({
+            sql: `SELECT timestamp, total_value, cash_balance, equity_value
+                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+            args: [cutoff]
+        });
+        return (r.rows as any[]).map(row => ({
+            timestamp: row.timestamp,
+            total_value: row.total_value,
+            cash_balance: row.cash_balance,
+            equity_value: row.equity_value,
+        }));
+    }
+
+    if (timeframe === '1W') {
+        // Last 7 days — sample every ~1 hour using SQLite window trick
+        const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const r = await db.execute({
+            sql: `SELECT timestamp, total_value, cash_balance, equity_value
+                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+            args: [cutoff]
+        });
+        const allRows = (r.rows as any[]).map(row => ({
+            timestamp: row.timestamp,
+            total_value: row.total_value,
+            cash_balance: row.cash_balance,
+            equity_value: row.equity_value,
+        }));
+        // Downsample: keep 1 per hour
+        return downsampleByInterval(allRows, 60 * 60 * 1000);
+    }
+
+    // 30D: use daily history + append today's snapshots
+    const histR = await db.execute({
+        sql: `SELECT date, total_value, cash_balance, equity_value
+              FROM portfolio_history ORDER BY date ASC LIMIT 30`,
+        args: []
+    });
+    const dailyPoints: PortfolioSnapshot[] = (histR.rows as any[]).map(row => ({
+        timestamp: row.date + 'T16:00:00Z', // EOD
+        total_value: row.total_value,
+        cash_balance: row.cash_balance,
+        equity_value: row.equity_value,
+    }));
+
+    // Append today's snapshots (sampled every 4 hours)
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const todayCutoff = todayStart.toISOString();
+    const todayR = await db.execute({
+        sql: `SELECT timestamp, total_value, cash_balance, equity_value
+              FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+        args: [todayCutoff]
+    });
+    const todaySnapshots: PortfolioSnapshot[] = (todayR.rows as any[]).map(row => ({
+        timestamp: row.timestamp,
+        total_value: row.total_value,
+        cash_balance: row.cash_balance,
+        equity_value: row.equity_value,
+    }));
+    const todaySampled = downsampleByInterval(todaySnapshots, 4 * 60 * 60 * 1000);
+
+    // Merge, dedup by removing daily rows for today (we have live snapshots instead)
+    const todayDate = now.toISOString().slice(0, 10);
+    const filteredDaily = dailyPoints.filter(p => !p.timestamp.startsWith(todayDate));
+    return [...filteredDaily, ...todaySampled];
+}
+
+/** Downsample snapshots to at most 1 per interval (in ms). Keeps first point per bucket + always keeps the last point. */
+function downsampleByInterval(points: PortfolioSnapshot[], intervalMs: number): PortfolioSnapshot[] {
+    if (points.length <= 2) return points;
+    const result: PortfolioSnapshot[] = [];
+    let lastBucket = -1;
+    for (const p of points) {
+        const ts = new Date(p.timestamp).getTime();
+        const bucket = Math.floor(ts / intervalMs);
+        if (bucket !== lastBucket) {
+            result.push(p);
+            lastBucket = bucket;
+        }
+    }
+    // Always include the last point for up-to-date value
+    const last = points[points.length - 1];
+    if (result.length > 0 && result[result.length - 1].timestamp !== last.timestamp) {
+        result.push(last);
+    }
+    return result;
+}
+
+/** Clean up portfolio snapshots older than 31 days. */
+export async function cleanupOldSnapshots(): Promise<number> {
+    const db = getTurso();
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 31);
+    const cutoffStr = cutoff.toISOString();
+    const r = await db.execute({
+        sql: 'DELETE FROM portfolio_snapshots WHERE timestamp < ?',
+        args: [cutoffStr],
+    });
+    return r.rowsAffected;
 }
 
 export async function executeTrade(

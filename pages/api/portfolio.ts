@@ -1,6 +1,6 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getPortfolioStatus, getHoldings, getTransactions, getHistory, initPortfolioTables } from '../../lib/portfolio-db';
+import { getPortfolioStatus, getHoldings, getTransactions, getHistory, getDetailedHistory, initPortfolioTables } from '../../lib/portfolio-db';
 import { getScreenerData } from '../../lib/db';
 
 export default async function handler(
@@ -10,12 +10,15 @@ export default async function handler(
     try {
         await initPortfolioTables();
 
-        const [status, holdings, transactionsRaw, history, screenerData] = await Promise.all([
+        const [status, holdings, transactionsRaw, history, screenerData, detail1D, detail1W, detail30D] = await Promise.all([
             getPortfolioStatus(),
             getHoldings(),
             getTransactions(50),
             getHistory(30),
-            getScreenerData()
+            getScreenerData(),
+            getDetailedHistory('1D'),
+            getDetailedHistory('1W'),
+            getDetailedHistory('30D'),
         ]);
 
         const companyMap = new Map(screenerData.map(d => [d.ticker, d.company_name]));
@@ -29,7 +32,12 @@ export default async function handler(
             status,
             holdings,
             transactions,
-            history
+            history,
+            detailedHistory: {
+                '1D': detail1D,
+                '1W': detail1W,
+                '30D': detail30D,
+            },
         });
     } catch (error: any) {
         console.error('Portfolio API Error:', error);

@@ -32,6 +32,11 @@ interface PortfolioData {
         date: string;
         total_value: number;
     }[];
+    detailedHistory?: {
+        '1D': { timestamp: string; total_value: number }[];
+        '1W': { timestamp: string; total_value: number }[];
+        '30D': { timestamp: string; total_value: number }[];
+    };
 }
 
 const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T') ? d + 'Z' : d.replace(' ', 'T') + 'Z'));
@@ -153,11 +158,22 @@ const LivePortfolio = () => {
                         <div className="h-[300px] w-full" style={{ outline: 'none' }}>
                             <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
                                 <AreaChart
-                                    data={
-                                        timeframe === '1D' ? data.history.slice(-2)
+                                    data={(() => {
+                                        // Use detailedHistory if available, fallback to legacy history
+                                        if (data.detailedHistory) {
+                                            const detailed = data.detailedHistory[timeframe];
+                                            if (detailed && detailed.length > 0) {
+                                                return detailed.map(p => ({
+                                                    date: p.timestamp,
+                                                    total_value: p.total_value,
+                                                }));
+                                            }
+                                        }
+                                        // Fallback to legacy daily history
+                                        return timeframe === '1D' ? data.history.slice(-2)
                                             : timeframe === '1W' ? data.history.slice(-7)
-                                                : data.history
-                                    }
+                                                : data.history;
+                                    })()}
                                     style={{ outline: 'none' }}
                                 >
                                     <defs>
@@ -168,7 +184,16 @@ const LivePortfolio = () => {
                                     </defs>
                                     <XAxis
                                         dataKey="date"
-                                        tickFormatter={(str) => new Date(str).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                                        tickFormatter={(str) => {
+                                            const d = new Date(str);
+                                            if (timeframe === '1D') {
+                                                return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+                                            }
+                                            if (timeframe === '1W') {
+                                                return d.toLocaleDateString(undefined, { weekday: 'short', hour: 'numeric' });
+                                            }
+                                            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                                        }}
                                         stroke="#4b5563"
                                         fontSize={12}
                                     />
@@ -182,7 +207,16 @@ const LivePortfolio = () => {
                                         contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }}
                                         itemStyle={{ color: '#10b981' }}
                                         formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString()}`, 'Value'] as [string, string]}
-                                        labelFormatter={(label) => new Date(label).toLocaleDateString()}
+                                        labelFormatter={(label) => {
+                                            const d = new Date(label);
+                                            if (timeframe === '1D') {
+                                                return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+                                            }
+                                            if (timeframe === '1W') {
+                                                return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
+                                            }
+                                            return d.toLocaleDateString();
+                                        }}
                                     />
                                     <Area
                                         type="monotone"
