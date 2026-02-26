@@ -124,10 +124,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                 <div className="bg-gray-800 rounded-xl p-6 relative overflow-hidden transition-colors border border-gray-700 hover:border-gray-500">
                     <h3 className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-2">
                         <Activity size={16} /> Total Portfolio Value
-                        <span className="ml-auto flex items-center gap-1 text-[10px] text-gray-600">
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                            LIVE
-                        </span>
                     </h3>
                     <div className="text-3xl font-bold text-white flex items-baseline gap-2">
                         <AnimatedNumber value={totalValue} prefix="$" decimals={2} className="text-white" />
