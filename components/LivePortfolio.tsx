@@ -39,12 +39,16 @@ interface PortfolioData {
     };
 }
 
+interface LivePortfolioProps {
+    initialTimeframe?: '1D' | '1W' | '30D';
+}
+
 const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T') ? d + 'Z' : d.replace(' ', 'T') + 'Z'));
 
-const LivePortfolio = () => {
+const LivePortfolio = ({ initialTimeframe = '30D' }: LivePortfolioProps = {}) => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
-    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D'>('30D');
+    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D'>(initialTimeframe);
     const [showAdminLogs, setShowAdminLogs] = useState(false);
     const [adminPassword, setAdminPassword] = useState('');
     const [adminLoading, setAdminLoading] = useState(false);

@@ -1,27 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Head from 'next/head';
-import { Search, BarChart3, Activity } from 'lucide-react';
 import Layout from '../components/Layout';
-import TickerAnalyzer from '../components/TickerAnalyzer';
 import StockScreener from '../components/StockScreener';
-import LivePortfolio from '../components/LivePortfolio';
-import CloudStatus from '../components/CloudStatus';
+import Navigation from '../components/Navigation';
 import ShinyText from '../components/ShinyText';
+import CloudStatus from '../components/CloudStatus';
+import { useRouter } from 'next/router';
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState('screener');
+  const router = useRouter();
 
-  const [selectedTicker, setSelectedTicker] = useState<string>('');
   const handleTickerClick = (ticker: string) => {
-    setSelectedTicker(ticker);
-    setActiveTab('analyzer');
+    router.push(`/analyze?ticker=${ticker}`);
   };
-
-  const tabs = [
-    { id: 'screener', label: 'Stock Screener', icon: BarChart3 },
-    { id: 'analyzer', label: 'Ticker Analyzer', icon: Search },
-    { id: 'portfolio', label: 'Live Portfolio', icon: Activity },
-  ];
 
   return (
     <>
@@ -41,43 +32,17 @@ export default function Home() {
               <h1>
                 <ShinyText text="TickSignals" className="text-5xl sm:text-6xl md:text-7xl font-bold tracking-tight pb-2 text-white" speed={3} />
               </h1>
-              {activeTab === 'portfolio' && (
-                <div className="mt-2 sm:mt-0">
-                  <CloudStatus />
-                </div>
-              )}
             </div>
           </div>
         </div>
 
         {/* Tab Navigation */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-6">
-          <div className="bg-gray-800 rounded-xl p-1 inline-flex gap-1 border border-gray-700">
-            {tabs.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-colors text-sm ${activeTab === tab.id
-                    ? 'bg-aquamarine-600 text-white'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
-                    }`}
-                >
-                  <Icon size={16} />
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        <Navigation />
 
         {/* Content */}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-16">
           <div className="animate-slide-up">
-            {activeTab === 'screener' && <StockScreener onTickerClick={handleTickerClick} />}
-            {activeTab === 'analyzer' && <TickerAnalyzer initialTicker={selectedTicker} />}
-            {activeTab === 'portfolio' && <LivePortfolio />}
+            <StockScreener onTickerClick={handleTickerClick} />
           </div>
         </div>
       </Layout>
