@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText } from 'lucide-react';
 import BlurText from './BlurText';
+import AnimatedNumber from './AnimatedNumber';
 
 interface PortfolioData {
     status: {
@@ -59,22 +60,46 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         cycleLogs?: { cycle_type: string; ran_at: string; summary: string }[];
     } | null>(null);
 
-    useEffect(() => {
-        fetchPortfolio();
-    }, []);
+    const pollInterval = useRef<NodeJS.Timeout | null>(null);
+    const isFirstLoad = useRef(true);
 
-    const fetchPortfolio = async () => {
+    const fetchPortfolio = useCallback(async (silent = false) => {
         try {
-            setLoading(true);
+            if (!silent) setLoading(true);
             const res = await fetch('/api/portfolio');
             const json = await res.json();
             setData(json);
         } catch (err) {
             console.error(err);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
-    };
+    }, []);
+
+    // Initial fetch + polling every 30s
+    useEffect(() => {
+        fetchPortfolio();
+
+        pollInterval.current = setInterval(() => {
+            fetchPortfolio(true); // silent refresh, no loading spinner
+        }, 30_000);
+
+        // Pause polling when tab is hidden, resume when visible
+        const handleVisibility = () => {
+            if (document.hidden) {
+                if (pollInterval.current) clearInterval(pollInterval.current);
+            } else {
+                fetchPortfolio(true);
+                pollInterval.current = setInterval(() => fetchPortfolio(true), 30_000);
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibility);
+
+        return () => {
+            if (pollInterval.current) clearInterval(pollInterval.current);
+            document.removeEventListener('visibilitychange', handleVisibility);
+        };
+    }, [fetchPortfolio]);
 
     if (loading) return (
         <div className="flex justify-center items-center h-64 text-aquamarine-400 animate-pulse">
@@ -99,11 +124,15 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                 <div className="bg-gray-800 rounded-xl p-6 relative overflow-hidden transition-colors border border-gray-700 hover:border-gray-500">
                     <h3 className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-2">
                         <Activity size={16} /> Total Portfolio Value
+                        <span className="ml-auto flex items-center gap-1 text-[10px] text-gray-600">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                            LIVE
+                        </span>
                     </h3>
                     <div className="text-3xl font-bold text-white flex items-baseline gap-2">
-                        $<BlurText text={totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} className="inline-block" delay={50} />
+                        <AnimatedNumber value={totalValue} prefix="$" decimals={2} className="text-white" />
                         <span className={`text-sm ml-2 font-medium px-2 py-0.5 rounded-full ${isPositive ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
-                            {isPositive ? '+' : ''}{totalReturn.toFixed(2)}%
+                            <AnimatedNumber value={totalReturn} prefix={isPositive ? '+' : ''} suffix="%" decimals={2} className={isPositive ? 'text-green-400' : 'text-red-400'} />
                         </span>
                     </div>
                     <p className="text-xs text-gray-500 mt-2">Started with $100,000.00</p>
@@ -113,14 +142,14 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                 <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 flex flex-col justify-center">
                     <div className="flex justify-between items-center mb-2">
                         <span className="text-gray-400 text-sm">Cash Balance</span>
-                        <span className="text-white font-mono">${cash.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                        <AnimatedNumber value={cash} prefix="$" decimals={0} className="text-white font-mono" />
                     </div>
                     <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden mb-4">
                         <div className="bg-emerald-400 h-full" style={{ width: `${(cash / totalValue) * 100}%` }}></div>
                     </div>
                     <div className="flex justify-between items-center mb-2">
                         <span className="text-gray-400 text-sm">Equity (Stocks)</span>
-                        <span className="text-white font-mono">${equity.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                        <AnimatedNumber value={equity} prefix="$" decimals={0} className="text-white font-mono" />
                     </div>
                     <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
                         <div className="bg-blue-500 h-full" style={{ width: `${(equity / totalValue) * 100}%` }}></div>
@@ -275,10 +304,14 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                     </td>
                                                     <td className="p-4 text-right text-gray-300">{h.shares.toFixed(2)}</td>
                                                     <td className="p-4 text-right text-gray-400">${h.avg_cost.toFixed(2)}</td>
-                                                    <td className="p-4 text-right text-white">${h.current_price.toFixed(2)}</td>
-                                                    <td className="p-4 text-right text-white font-medium">${h.market_value.toLocaleString()}</td>
-                                                    <td className={`p-4 text-right font-bold ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
-                                                        {isProfitable ? '+' : ''}{h.return_pct.toFixed(2)}%
+                                                    <td className="p-4 text-right">
+                                                        <AnimatedNumber value={h.current_price} prefix="$" decimals={2} className="text-white" />
+                                                    </td>
+                                                    <td className="p-4 text-right font-medium">
+                                                        <AnimatedNumber value={h.market_value} prefix="$" decimals={0} className="text-white" />
+                                                    </td>
+                                                    <td className="p-4 text-right font-bold">
+                                                        <AnimatedNumber value={h.return_pct} prefix={isProfitable ? '+' : ''} suffix="%" decimals={2} className={isProfitable ? 'text-green-400' : 'text-red-400'} />
                                                     </td>
                                                 </tr>
                                             );
