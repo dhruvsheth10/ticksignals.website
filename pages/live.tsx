@@ -12,7 +12,7 @@ type Timeframe = '1D' | '1W' | '30D';
 export default function Live() {
     const router = useRouter();
     const { timeframe } = router.query;
-    const [initialTimeframe, setInitialTimeframe] = useState<Timeframe>('30D');
+    const [initialTimeframe, setInitialTimeframe] = useState<Timeframe>('1D');
     const [ready, setReady] = useState(false);
 
     useEffect(() => {
@@ -20,8 +20,8 @@ export default function Live() {
             if (timeframe) {
                 const tf = (timeframe as string).toLowerCase();
                 if (tf === '7d' || tf === '1w') setInitialTimeframe('1W');
-                else if (tf === '1d') setInitialTimeframe('1D');
-                else setInitialTimeframe('30D');
+                else if (tf === '30d') setInitialTimeframe('30D');
+                else setInitialTimeframe('1D');
             }
             setReady(true);
         }
