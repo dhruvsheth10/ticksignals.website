@@ -22,8 +22,8 @@ export default function Navigation() {
                             key={tab.id}
                             href={tab.id}
                             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg font-medium transition-colors text-sm whitespace-nowrap ${isActive
-                                    ? 'bg-aquamarine-600 text-white'
-                                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                                ? 'bg-aquamarine-600 text-white'
+                                : 'text-gray-400 hover:text-white hover:bg-gray-700'
                                 }`}
                         >
                             <Icon size={16} />

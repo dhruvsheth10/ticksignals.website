@@ -1,5 +1,5 @@
-
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText } from 'lucide-react';
 import BlurText from './BlurText';
@@ -268,7 +268,11 @@ const LivePortfolio = ({ initialTimeframe = '30D' }: LivePortfolioProps = {}) =>
                                             const isProfitable = h.return_pct >= 0;
                                             return (
                                                 <tr key={h.ticker} className="hover:bg-gray-700/20 transition-colors">
-                                                    <td className="p-4 font-bold text-white">{h.ticker}</td>
+                                                    <td className="p-4 font-bold text-white">
+                                                        <Link href={`/analyze?ticker=${h.ticker}`} className="hover:text-aquamarine-400 underline decoration-gray-500/30 underline-offset-4 decoration-dashed transition-colors">
+                                                            {h.ticker}
+                                                        </Link>
+                                                    </td>
                                                     <td className="p-4 text-right text-gray-300">{h.shares.toFixed(2)}</td>
                                                     <td className="p-4 text-right text-gray-400">${h.avg_cost.toFixed(2)}</td>
                                                     <td className="p-4 text-right text-white">${h.current_price.toFixed(2)}</td>
@@ -315,7 +319,9 @@ const LivePortfolio = ({ initialTimeframe = '30D' }: LivePortfolioProps = {}) =>
                                                     }`}>
                                                     {tx.type}
                                                 </span>
-                                                <span className="font-bold text-white tracking-wide">{tx.ticker}</span>
+                                                <Link href={`/analyze?ticker=${tx.ticker}`} className="font-bold text-white tracking-wide hover:text-aquamarine-400 transition-colors">
+                                                    {tx.ticker}
+                                                </Link>
                                             </div>
                                             {tx.company_name && (
                                                 <div className="text-xs text-gray-400 mb-0.5 max-w-[150px] truncate" title={tx.company_name}>
@@ -475,7 +481,7 @@ const LivePortfolio = ({ initialTimeframe = '30D' }: LivePortfolioProps = {}) =>
                                                     {adminLogs.trades.map((tx: any, idx: number) => (
                                                         <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
                                                             <div className="flex justify-between items-center mb-1">
-                                                                <span className="font-bold">{tx.ticker}</span>
+                                                                <Link href={`/analyze?ticker=${tx.ticker}`} className="font-bold hover:text-aquamarine-400 transition-colors">{tx.ticker}</Link>
                                                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>{tx.type}</span>
                                                             </div>
                                                             <div className="flex justify-between text-gray-400">
@@ -504,7 +510,7 @@ const LivePortfolio = ({ initialTimeframe = '30D' }: LivePortfolioProps = {}) =>
                                                         return (
                                                             <div key={idx} className="rounded-md border border-gray-700/60 bg-gray-800/70 p-2">
                                                                 <div className="flex justify-between items-center mb-1">
-                                                                    <span className="font-bold">{row.ticker}</span>
+                                                                    <Link href={`/analyze?ticker=${row.ticker}`} className="font-bold hover:text-aquamarine-400 transition-colors">{row.ticker}</Link>
                                                                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${row.action === 'BUY' ? 'bg-green-500/20 text-green-400' : row.action === 'SELL' ? 'bg-red-500/20 text-red-400' : 'bg-gray-500/20 text-gray-300'
                                                                         }`}>{displayAction} {row.confidence != null ? `(${row.confidence}%)` : ''}</span>
                                                                 </div>
