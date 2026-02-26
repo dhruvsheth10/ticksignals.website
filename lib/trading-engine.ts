@@ -122,14 +122,26 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             : 0;
 
         // ─── 2a. ATR-Based Trailing Stop ───
-        // If no ATR stored, fall back to a percentage-based stop
-        const atr = holding.atr || (holding.avg_cost * 0.02); // fallback: 2% of cost
+        // If no ATR stored, use 3% of avg_cost as fallback (2% was too tight)
+        const atr = holding.atr > 0 ? holding.atr : (holding.avg_cost * 0.03);
         const trailDistance = 2.0 * atr;
         const hwm = holding.high_water_mark || holding.avg_cost;
         const trailStopPrice = hwm - trailDistance;
 
-        if (price < trailStopPrice && returnPct < -1) {
-            // Only trigger if we're actually losing money (not just below HWM due to ATR width)
+        // Hard stop: if down more than 5% from cost basis, exit regardless
+        if (returnPct <= -5) {
+            const sellShares = holding.shares;
+            await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                `Hard Stop -5%: ${returnPct.toFixed(1)}% (cost $${holding.avg_cost.toFixed(2)})`);
+            summaryLines.push(`  SELL ${holding.ticker}: hard stop -5% (${returnPct.toFixed(1)}%)`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
+            totalEquity -= sellShares * price;
+            continue;
+        }
+
+        // Don't trail-stop on trade day — give position at least 1 full session
+        if (daysHeld >= 0.5 && price < trailStopPrice && returnPct < -1) {
             const sellShares = holding.shares;
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
                 `Trailing Stop: Price $${price.toFixed(2)} < Trail $${trailStopPrice.toFixed(2)} (HWM $${hwm.toFixed(2)}, ATR $${atr.toFixed(2)})`);
@@ -252,10 +264,12 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     const freshStatus = await getPortfolioStatus();
     const updatedHoldings = await getHoldings();
 
-    // Dynamic cash floor: 10% of total portfolio value (min $500)
-    const cashFloor = Math.max(500, freshStatus.total_value * 0.10);
+    // Dynamic cash floor: keep 20% of portfolio liquid (min $1000)
+    const cashFloor = Math.max(1000, freshStatus.total_value * 0.20);
     const MAX_POSITIONS = 10;
-    const MAX_BUYS_PER_CYCLE = 4;
+    // Limit first cycle to 4 buys, subsequent same-day cycles to 2
+    const isFirstCycleToday = updatedHoldings.length <= 1;
+    const MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
 
     const candidates = await getBuyCandidates();
     const top5 = candidates.slice(0, 5);
@@ -404,10 +418,14 @@ function calculatePositionSize(
     size = Math.min(size, cashAvailable * 0.40);
 
     // ATR risk adjustment: if stock is very volatile, reduce position
-    // ATR as % of price > 4% → cut position 30%
-    if (atr > 0 && totalValue > 0) {
-        const atrPctOfSize = (atr / (size || 1)) * 100;
-        if (atrPctOfSize > 4) {
+    // ATR as % of stock price > 3% → cut position 30%, > 5% → cut 50%
+    if (atr > 0) {
+        // Estimate per-share price from target allocation (approximate)
+        const estimatedPrice = size > 0 ? cashAvailable / 10 : 100;
+        const atrPctOfPrice = (atr / estimatedPrice) * 100;
+        if (atrPctOfPrice > 5) {
+            size *= 0.5;
+        } else if (atrPctOfPrice > 3) {
             size *= 0.7;
         }
     }
@@ -552,24 +570,36 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
             }
 
             // 3. RSI Dip Buy in Uptrend
-            if (ind.rsi < 40) {
+            if (ind.rsi < 40 && ind.rsi > 25) {
                 buyConfidence += 25;
                 buySignals.push(`RSI ${Math.round(ind.rsi)} (oversold dip buy)`);
+            } else if (ind.rsi <= 25) {
+                // Extremely oversold — could be in freefall, not a dip
+                buyConfidence += 5;
+                buySignals.push(`RSI ${Math.round(ind.rsi)} (extreme oversold, caution)`);
             } else if (ind.rsi < 50 && current.close > ind.ema10) {
                 buyConfidence += 15;
                 buySignals.push(`RSI ${Math.round(ind.rsi)} (momentum pullback)`);
             } else if (ind.rsi < 60) {
                 buyConfidence += 5;
                 buySignals.push(`RSI ${Math.round(ind.rsi)} (neutral)`);
+            } else if (ind.rsi >= 65) {
+                // Overbought — penalize, don't buy into extended moves
+                buyConfidence -= 10;
+                buySignals.push(`RSI ${Math.round(ind.rsi)} (overbought, risky entry)`);
             }
 
             // 4. StochRSI Cross-Up (buy timing)
-            if (ind.stochRsi < 30) {
+            if (ind.stochRsi > 5 && ind.stochRsi < 30) {
                 buyConfidence += 20;
                 buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (oversold bounce)`);
-            } else if (ind.stochRsi < 50) {
+            } else if (ind.stochRsi >= 30 && ind.stochRsi < 50) {
                 buyConfidence += 8;
                 buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)}`);
+            } else if (ind.stochRsi <= 5) {
+                // Actively dumping, wait for bounce
+                buyConfidence -= 15;
+                buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (falling knife, wait for bounce)`);
             }
 
             // 5. MACD Bullish
@@ -578,6 +608,10 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                 buySignals.push('MACD bullish');
             } else if (ind.macd.histogram > 0) {
                 buyConfidence += 5;
+            } else if (ind.macd.histogram < 0 && ind.macd.macd < ind.macd.signal) {
+                // Bearish MACD in an apparent uptrend = divergence warning
+                buyConfidence -= 12;
+                buySignals.push('MACD bearish divergence');
             }
 
             // 6. Volume Confirmation
@@ -619,11 +653,19 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
             }
 
             // 11. Price Momentum
-            if (ind.priceChange > 5) {
+            if (ind.priceChange > 5 && ind.priceChange < 15) {
                 buyConfidence += 8;
                 buySignals.push(`+${ind.priceChange.toFixed(1)}% momentum`);
+            } else if (ind.priceChange >= 15) {
+                // Already extended > 15% in 20 days, risky chase
+                buyConfidence -= 5;
+                buySignals.push(`+${ind.priceChange.toFixed(1)}% (extended, late entry risk)`);
             } else if (ind.priceChange > 2) {
                 buyConfidence += 3;
+            } else if (ind.priceChange < -5) {
+                // Declining price in supposed uptrend = contradictory
+                buyConfidence -= 8;
+                buySignals.push(`${ind.priceChange.toFixed(1)}% (price declining)`);
             }
 
             // 12. Sentiment
