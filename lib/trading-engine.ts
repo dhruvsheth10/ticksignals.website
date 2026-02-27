@@ -124,7 +124,9 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         // ─── 2a. ATR-Based Trailing Stop ───
         // If no ATR stored, use 3% of avg_cost as fallback (2% was too tight)
         const atr = holding.atr > 0 ? holding.atr : (holding.avg_cost * 0.03);
-        const trailDistance = 2.0 * atr;
+        // Tighten the trailing stop if we're decently in profit (> 2%)
+        const trailMultiplier = returnPct > 2 ? 1.5 : 2.0;
+        const trailDistance = trailMultiplier * atr;
         const hwm = holding.high_water_mark || holding.avg_cost;
         const trailStopPrice = hwm - trailDistance;
 
@@ -141,7 +143,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         }
 
         // Don't trail-stop on trade day — give position at least 1 full session
-        if (daysHeld >= 0.5 && price < trailStopPrice && returnPct < -1) {
+        if (daysHeld >= 0.5 && price < trailStopPrice) {
             const sellShares = holding.shares;
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
                 `Trailing Stop: Price $${price.toFixed(2)} < Trail $${trailStopPrice.toFixed(2)} (HWM $${hwm.toFixed(2)}, ATR $${atr.toFixed(2)})`);
@@ -155,35 +157,35 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         // ─── 2b. Scaled Partial Profit Taking ───
         const partialSells = holding.partial_sells || 0;
 
-        // +5% → sell 33% (first partial)
-        if (returnPct >= 5 && partialSells === 0 && holding.shares > 1) {
+        // +2% → sell 33% (first partial)
+        if (returnPct >= 2 && partialSells === 0 && holding.shares > 1) {
             const sellShares = Math.max(1, Math.floor(holding.shares * 0.33));
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
-                `Partial Profit +5% (1/3 position, ${returnPct.toFixed(1)}%)`);
-            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +5% lock 33%`);
+                `Partial Profit +2% (1/3 position, ${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +2% lock 33%`);
             const fresh = await getPortfolioStatus();
             await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
             totalEquity -= sellShares * price;
             continue; // let the next cycle handle the remaining shares
         }
 
-        // +10% → sell another 33% (second partial)
-        if (returnPct >= 10 && partialSells === 1 && holding.shares > 1) {
+        // +4% → sell another 33% (second partial)
+        if (returnPct >= 4 && partialSells === 1 && holding.shares > 1) {
             const sellShares = Math.max(1, Math.floor(holding.shares * 0.5)); // 50% of remaining ≈ 33% original
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
-                `Partial Profit +10% (2/3 position, ${returnPct.toFixed(1)}%)`);
-            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +10% lock 50% remaining`);
+                `Partial Profit +4% (2/3 position, ${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +4% lock 50% remaining`);
             const fresh = await getPortfolioStatus();
             await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
             totalEquity -= sellShares * price;
             continue;
         }
 
-        // +15% or more → sell remaining (full exit)
-        if (returnPct >= 15 && partialSells >= 2) {
+        // +6% or more → sell remaining (full exit)
+        if (returnPct >= 6 && partialSells >= 2) {
             await executeTrade(holding.ticker, 'SELL', holding.shares, price,
-                `Full Profit Exit +15% (${returnPct.toFixed(1)}%)`);
-            summaryLines.push(`  SELL ${holding.ticker}: full exit at +15%`);
+                `Full Profit Exit +6% (${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  SELL ${holding.ticker}: full exit at +6%`);
             const fresh = await getPortfolioStatus();
             await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
             totalEquity -= holding.shares * price;
@@ -266,7 +268,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     // Dynamic cash floor: keep 20% of portfolio liquid (min $1000)
     const cashFloor = Math.max(1000, freshStatus.total_value * 0.20);
-    const MAX_POSITIONS = 10;
+    const MAX_POSITIONS = 25; // Soft ceiling, rarely reached due to dynamic confidence
     // Limit first cycle to 4 buys, subsequent same-day cycles to 2
     const isFirstCycleToday = updatedHoldings.length <= 1;
     const MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
@@ -275,7 +277,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     const top5 = candidates.slice(0, 5);
 
     if (freshStatus.cash_balance <= cashFloor || updatedHoldings.length >= MAX_POSITIONS) {
-        summaryLines.push(`No buy: ${freshStatus.cash_balance <= cashFloor ? `cash ≤ floor $${cashFloor.toFixed(0)}` : 'max positions (10)'}. Top 5:`);
+        summaryLines.push(`No buy: ${freshStatus.cash_balance <= cashFloor ? `cash ≤ floor $${cashFloor.toFixed(0)}` : `max positions (${MAX_POSITIONS})`}. Top 5:`);
         for (const c of top5) {
             summaryLines.push(`  ${c.ticker} ${c.confidence}% - ${freshStatus.cash_balance <= cashFloor ? 'low cash' : 'at max positions'}`);
         }
@@ -315,10 +317,18 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // Confidence gate: 65% minimum
-        if (candidate.confidence < 65) {
+        // Dynamic confidence gate:
+        // 5-10 positions is ideal, requiring the base 65%
+        // As positions grow, demand progressively higher confidence
+        let requiredConfidence = 65;
+        const currentCount = updatedHoldings.length + buyCount;
+        if (currentCount >= 20) requiredConfidence = 90;
+        else if (currentCount >= 15) requiredConfidence = 85;
+        else if (currentCount >= 10) requiredConfidence = 75;
+
+        if (candidate.confidence < requiredConfidence) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
-                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - below 65% threshold (skip)`);
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - below dynamic threshold ${requiredConfidence}% (skip)`);
             }
             continue;
         }
@@ -386,13 +396,13 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 // ══════════════════════════════════════════════════════════════════════
 
 /**
- * Calculate position size based on confidence, volatility, portfolio state.
+ * Calculate position size dynamically based on confidence factor.
+ * The higher the confidence, the larger the capital allocation.
  *
- * - 65-75% confidence → 5% of portfolio
- * - 75-85% confidence → 8% of portfolio
- * - 85-95% confidence → 12% of portfolio
- *
- * Adjusted by: existing positions count, available cash ratio, ATR risk.
+ * Higher conviction scores are exponentially rewarded with more capital.
+ * - ~65% confidence -> ~5% of portfolio
+ * - ~80% confidence -> ~10% of portfolio
+ * - ~95% confidence -> ~17% of portfolio
  */
 function calculatePositionSize(
     confidence: number,
@@ -401,21 +411,20 @@ function calculatePositionSize(
     cashAvailable: number,
     currentPositions: number
 ): number {
-    // Base allocation percentage by confidence tier
-    let basePct: number;
-    if (confidence >= 85) basePct = 0.12;
-    else if (confidence >= 75) basePct = 0.08;
-    else basePct = 0.05;
+    // Use an exponential curve to scale capital allocation based on confidence.
+    // This rewards high conviction setups with significantly more capital.
+    const confidenceRatio = Math.max(0, Math.min(100, confidence)) / 100;
+
+    // For 65% -> 0.65^3 * 0.20 = 0.054 (5.4%)
+    // For 80% -> 0.80^3 * 0.20 = 0.102 (10.2%)
+    // For 95% -> 0.95^3 * 0.20 = 0.171 (17.1%)
+    const basePct = Math.pow(confidenceRatio, 3) * 0.20;
 
     let size = totalValue * basePct;
 
-    // Scale down as positions increase (diversification pressure)
-    // At 5 positions, reduce by 20%; at 8, reduce by 40%
-    const positionPenalty = Math.max(0.6, 1 - (currentPositions * 0.05));
-    size *= positionPenalty;
-
-    // Never use more than 40% of remaining cash on a single position
-    size = Math.min(size, cashAvailable * 0.40);
+    // Never use more than 50% of the remaining liquid cash on a single position 
+    // to ensure capital doesn't entirely run out on one trade.
+    size = Math.min(size, cashAvailable * 0.50);
 
     // ATR risk adjustment: if stock is very volatile, reduce position
     // ATR as % of stock price > 3% → cut position 30%, > 5% → cut 50%
