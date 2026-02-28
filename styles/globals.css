@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Kill focus outlines on recharts SVG elements */
+.recharts-surface,
+.recharts-surface:focus,
+.recharts-wrapper,
+.recharts-wrapper:focus,
+.recharts-wrapper svg,
+.recharts-wrapper svg:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
 @layer base {
   body {
     @apply bg-gray-900 text-white antialiased;
