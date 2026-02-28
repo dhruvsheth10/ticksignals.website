@@ -415,11 +415,12 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promis
         return downsampleByInterval(allRows, 60 * 60 * 1000);
     }
 
-    // 30D: use daily history + append today's snapshots
+    // 30D: use daily history for last 30 days + append today's snapshots
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const histR = await db.execute({
         sql: `SELECT date, total_value, cash_balance, equity_value
-              FROM portfolio_history ORDER BY date ASC LIMIT 30`,
-        args: []
+              FROM portfolio_history WHERE date >= ? ORDER BY date ASC`,
+        args: [thirtyDaysAgo]
     });
     const dailyPoints: PortfolioSnapshot[] = [];
     for (const row of histR.rows as any[]) {
@@ -432,6 +433,8 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promis
             equity_value: row.equity_value,
         });
     }
+    // Sort by timestamp to handle inconsistent date formats
+    dailyPoints.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     // Append today's snapshots (sampled every 4 hours)
     const todayStart = new Date(now);

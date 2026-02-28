@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea } from 'recharts';
+import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText, TrendingUp, TrendingDown } from 'lucide-react';
 import BlurText from './BlurText';
 import AnimatedNumber from './AnimatedNumber';
 
@@ -58,6 +58,20 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         trades: any[];
         analysis: any[];
         cycleLogs?: { cycle_type: string; ran_at: string; summary: string }[];
+        dailyPnL?: { date: string; total_value: number; change_dollar: number; change_pct: number }[];
+    } | null>(null);
+
+    // Drag-to-select state (Google Finance style)
+    const [refAreaLeft, setRefAreaLeft] = useState<string | null>(null);
+    const [refAreaRight, setRefAreaRight] = useState<string | null>(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const [selectionInfo, setSelectionInfo] = useState<{
+        startValue: number;
+        endValue: number;
+        changeDollar: number;
+        changePct: number;
+        startLabel: string;
+        endLabel: string;
     } | null>(null);
 
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
@@ -100,6 +114,114 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
             document.removeEventListener('visibilitychange', handleVisibility);
         };
     }, [fetchPortfolio]);
+
+    // Clear selection whenever timeframe changes
+    useEffect(() => {
+        setSelectionInfo(null);
+        setRefAreaLeft(null);
+        setRefAreaRight(null);
+    }, [timeframe]);
+
+    // Build chart data
+    const chartData = useMemo(() => {
+        if (!data) return [];
+        if (data.detailedHistory) {
+            const detailed = data.detailedHistory[timeframe];
+            if (detailed && detailed.length > 0) {
+                return detailed.map(p => ({
+                    date: p.timestamp,
+                    total_value: p.total_value,
+                }));
+            }
+        }
+        // Fallback to legacy daily history
+        return timeframe === '1D' ? data.history.slice(-2)
+            : timeframe === '1W' ? data.history.slice(-7)
+                : data.history;
+    }, [data, timeframe]);
+
+    // Drag handlers for range selection
+    const handleMouseDown = useCallback((e: any) => {
+        if (e && e.activeLabel) {
+            setRefAreaLeft(e.activeLabel);
+            setRefAreaRight(null);
+            setIsDragging(true);
+            setSelectionInfo(null);
+        }
+    }, []);
+
+    const handleMouseMove = useCallback((e: any) => {
+        if (isDragging && e && e.activeLabel) {
+            setRefAreaRight(e.activeLabel);
+        }
+    }, [isDragging]);
+
+    const handleMouseUp = useCallback(() => {
+        if (!isDragging || !refAreaLeft) {
+            setIsDragging(false);
+            return;
+        }
+        setIsDragging(false);
+
+        const left = refAreaLeft;
+        const right = refAreaRight || refAreaLeft;
+
+        // Find the indices
+        const leftIdx = chartData.findIndex(d => d.date === left);
+        const rightIdx = chartData.findIndex(d => d.date === right);
+
+        if (leftIdx < 0 || rightIdx < 0) {
+            setRefAreaLeft(null);
+            setRefAreaRight(null);
+            return;
+        }
+
+        const startIdx = Math.min(leftIdx, rightIdx);
+        const endIdx = Math.max(leftIdx, rightIdx);
+
+        if (startIdx === endIdx) {
+            // Just a click, clear selection
+            setRefAreaLeft(null);
+            setRefAreaRight(null);
+            setSelectionInfo(null);
+            return;
+        }
+
+        const startPoint = chartData[startIdx];
+        const endPoint = chartData[endIdx];
+        const changeDollar = endPoint.total_value - startPoint.total_value;
+        const changePct = startPoint.total_value > 0
+            ? ((endPoint.total_value - startPoint.total_value) / startPoint.total_value) * 100
+            : 0;
+
+        const formatLabel = (dateStr: string) => {
+            const d = parseDate(dateStr);
+            if (isNaN(d.getTime())) return dateStr;
+            if (timeframe === '1D') {
+                return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+            }
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+        };
+
+        setSelectionInfo({
+            startValue: startPoint.total_value,
+            endValue: endPoint.total_value,
+            changeDollar,
+            changePct,
+            startLabel: formatLabel(startPoint.date),
+            endLabel: formatLabel(endPoint.date),
+        });
+
+        // Keep the refArea visible to highlight the selection
+        setRefAreaLeft(chartData[startIdx].date);
+        setRefAreaRight(chartData[endIdx].date);
+    }, [isDragging, refAreaLeft, refAreaRight, chartData, timeframe]);
+
+    const clearSelection = useCallback(() => {
+        setRefAreaLeft(null);
+        setRefAreaRight(null);
+        setSelectionInfo(null);
+    }, []);
 
     if (loading) return (
         <div className="flex justify-center items-center h-64 text-aquamarine-400 animate-pulse">
@@ -152,8 +274,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                     </div>
                 </div>
 
-                {/* Quick Stats or Small Chart */}
-                {/* For now, just a placeholder or extra stat */}
+                {/* Quick Stats */}
                 <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 flex flex-col justify-center items-center text-center">
                     <PieChart className="w-8 h-8 text-aquamarine-400 mb-2" />
                     <div className="text-2xl font-bold text-white">{data.holdings.length}</div>
@@ -184,26 +305,44 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                 ))}
                             </div>
                         </div>
-                        <div className="h-[300px] w-full" style={{ outline: 'none' }}>
+
+                        {/* Selection Info Banner */}
+                        {selectionInfo && (
+                            <div className="mb-3 flex items-center justify-between bg-gray-900/80 border border-gray-600/50 rounded-lg px-4 py-2.5 animate-fade-in">
+                                <div className="flex items-center gap-4">
+                                    <div className="text-xs text-gray-400">
+                                        {selectionInfo.startLabel} → {selectionInfo.endLabel}
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <span className={`text-sm font-bold flex items-center gap-1 ${selectionInfo.changeDollar >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                            {selectionInfo.changeDollar >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                                            {selectionInfo.changeDollar >= 0 ? '+' : ''}${selectionInfo.changeDollar.toFixed(2)}
+                                        </span>
+                                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${selectionInfo.changePct >= 0 ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'}`}>
+                                            {selectionInfo.changePct >= 0 ? '+' : ''}{selectionInfo.changePct.toFixed(3)}%
+                                        </span>
+                                    </div>
+                                </div>
+                                <button onClick={clearSelection} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">✕ Clear</button>
+                            </div>
+                        )}
+
+                        <div className="text-[10px] text-gray-500 mb-1 select-none">
+                            {!selectionInfo && 'Click and drag on the chart to compare two points'}
+                        </div>
+
+                        <div
+                            className="h-[300px] w-full select-none"
+                            style={{ outline: 'none', cursor: isDragging ? 'col-resize' : 'crosshair' }}
+                            onMouseLeave={() => { if (isDragging) handleMouseUp(); }}
+                        >
                             <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
                                 <AreaChart
-                                    data={(() => {
-                                        // Use detailedHistory if available, fallback to legacy history
-                                        if (data.detailedHistory) {
-                                            const detailed = data.detailedHistory[timeframe];
-                                            if (detailed && detailed.length > 0) {
-                                                return detailed.map(p => ({
-                                                    date: p.timestamp,
-                                                    total_value: p.total_value,
-                                                }));
-                                            }
-                                        }
-                                        // Fallback to legacy daily history
-                                        return timeframe === '1D' ? data.history.slice(-2)
-                                            : timeframe === '1W' ? data.history.slice(-7)
-                                                : data.history;
-                                    })()}
+                                    data={chartData}
                                     style={{ outline: 'none' }}
+                                    onMouseDown={handleMouseDown}
+                                    onMouseMove={handleMouseMove}
+                                    onMouseUp={handleMouseUp}
                                 >
                                     <defs>
                                         <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
@@ -249,6 +388,17 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             return d.toLocaleDateString();
                                         }}
                                     />
+                                    {/* Highlighted selection region */}
+                                    {refAreaLeft && refAreaRight && (
+                                        <ReferenceArea
+                                            x1={refAreaLeft}
+                                            x2={refAreaRight}
+                                            strokeOpacity={0.3}
+                                            stroke="#6ee7b7"
+                                            fill="#6ee7b7"
+                                            fillOpacity={0.08}
+                                        />
+                                    )}
                                     <Area
                                         type="monotone"
                                         dataKey="total_value"
@@ -379,11 +529,11 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                     </div>
                 </div>
 
-                {/* Admin Logs Modal - outside map so it renders once and Logs button works */}
+                {/* Admin Logs Modal */}
                 {showAdminLogs && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { setShowAdminLogs(false); setAdminLogs(null); setAdminPassword(''); setAdminError(null); }}>
-                        <div className="w-full max-w-4xl rounded-xl bg-gray-900 border border-gray-700 shadow-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-                            <div className="flex items-center justify-between border-b border-gray-700 px-4 py-3">
+                        <div className="w-full max-w-6xl rounded-xl bg-gray-900 border border-gray-700 shadow-2xl max-h-[92vh] flex flex-col mx-4" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center justify-between border-b border-gray-700 px-5 py-3.5">
                                 <h2 className="text-sm font-semibold text-white flex items-center gap-2">
                                     <FileText size={16} className="text-aquamarine-400" />
                                     Trade & Signal Logs
@@ -422,6 +572,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                     trades: json.trades || [],
                                                     analysis: json.analysis || [],
                                                     cycleLogs: json.cycleLogs || [],
+                                                    dailyPnL: json.dailyPnL || [],
                                                 });
                                             } catch (err: any) {
                                                 setAdminError(err.message || 'Failed to load logs');
@@ -451,8 +602,8 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                             )}
 
                             {adminLogs && (
-                                <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs text-gray-200">
-                                    <div className="flex justify-between items-center mb-4">
+                                <div className="flex-1 overflow-y-auto p-5 space-y-5 text-xs text-gray-200">
+                                    <div className="flex justify-between items-center">
                                         <h3 className="font-semibold text-white">Trading Logic Logs</h3>
                                         <button
                                             onClick={() => {
@@ -465,6 +616,43 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                         </button>
                                     </div>
 
+                                    {/* ══════════ Daily P&L Section ══════════ */}
+                                    {adminLogs.dailyPnL && adminLogs.dailyPnL.length > 0 && (
+                                        <div className="rounded-lg border border-gray-700/60 bg-gray-800/70 overflow-hidden">
+                                            <div className="px-4 py-2.5 border-b border-gray-700/50 flex items-center gap-2">
+                                                <DollarSign size={14} className="text-aquamarine-400" />
+                                                <span className="font-semibold text-white text-xs">Daily P&L Summary</span>
+                                            </div>
+                                            <div className="divide-y divide-gray-700/30">
+                                                {adminLogs.dailyPnL.map((day, idx) => {
+                                                    const isUp = day.change_pct >= 0;
+                                                    const isFirst = idx === adminLogs.dailyPnL!.length - 1; // oldest day
+                                                    return (
+                                                        <div key={idx} className="px-4 py-2.5 flex items-center justify-between hover:bg-gray-700/20 transition-colors">
+                                                            <div className="flex items-center gap-3">
+                                                                <span className="text-gray-300 font-mono w-[85px]">{day.date}</span>
+                                                                <span className="text-gray-400 text-[11px]">${day.total_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                                            </div>
+                                                            {!isFirst ? (
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className={`font-bold ${isUp ? 'text-green-400' : 'text-red-400'}`}>
+                                                                        {isUp ? '+' : ''}{day.change_pct.toFixed(2)}%
+                                                                    </span>
+                                                                    <span className={`text-[11px] ${isUp ? 'text-green-500/70' : 'text-red-500/70'}`}>
+                                                                        ({isUp ? '+' : ''}${day.change_dollar.toFixed(2)})
+                                                                    </span>
+                                                                </div>
+                                                            ) : (
+                                                                <span className="text-gray-500 text-[11px]">—</span>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* ══════════ Cycle Logs ══════════ */}
                                     {adminLogs.cycleLogs && adminLogs.cycleLogs.length > 0 ? (
                                         <div className="space-y-2 mb-6">
                                             {adminLogs.cycleLogs.filter((l: any) => l.cycle_type !== 'PORTFOLIO_CHECK').map((entry: any, idx: number) => (
