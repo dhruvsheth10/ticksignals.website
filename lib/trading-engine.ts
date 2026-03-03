@@ -72,7 +72,8 @@ export function isMarketOpen(): boolean {
  *
  * Key improvements over v1:
  * - ATR-based trailing stops instead of fixed -4%
- * - Partial profit taking at +5%/+10%/+15%
+ * - Partial profit taking at +2%/+4%/+6%
+ * - Gap protection (gap-down exit, gap-fill partial)
  * - Up to 4 buys per cycle (was 1-2)
  * - Dynamic position sizing by confidence + risk
  * - ADX trend strength filter
@@ -154,8 +155,44 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // ─── 2b. Scaled Partial Profit Taking ───
+        // ─── 2b. Gap Protection ───
+        // If today's open gapped significantly from yesterday's close:
+        // - Gap DOWN > 3% on a losing position → exit immediately (don't wait for -5% hard stop)
+        // - Gap UP > 3% but price filling below open → lock in early partial to protect gains
         const partialSells = holding.partial_sells || 0;
+        try {
+            const gapCandles = await MarketDataService.getDailyCandles(holding.ticker, 5);
+            if (gapCandles.length >= 2) {
+                const todayCandle = gapCandles[gapCandles.length - 1];
+                const yesterdayCandle = gapCandles[gapCandles.length - 2];
+                const gapPct = ((todayCandle.open - yesterdayCandle.close) / yesterdayCandle.close) * 100;
+
+                // Gap-down: opened sharply lower and position is underwater → bail out
+                if (gapPct < -3 && returnPct < 0) {
+                    await executeTrade(holding.ticker, 'SELL', holding.shares, price,
+                        `Gap-Down Exit: ${gapPct.toFixed(1)}% gap, position at ${returnPct.toFixed(1)}%`);
+                    summaryLines.push(`  SELL ${holding.ticker}: gap-down ${gapPct.toFixed(1)}% exit (${returnPct.toFixed(1)}%)`);
+                    const fresh = await getPortfolioStatus();
+                    await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
+                    totalEquity -= holding.shares * price;
+                    continue;
+                }
+
+                // Gap-up fill: big gap up but price reversing below open → protect gains
+                if (gapPct > 3 && price < todayCandle.open && returnPct > 0 && partialSells === 0 && holding.shares > 1) {
+                    const sellShares = Math.max(1, Math.floor(holding.shares * 0.33));
+                    await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                        `Gap-Fill Protect: ${gapPct.toFixed(1)}% gap filling, locking 33% at ${returnPct.toFixed(1)}%`);
+                    summaryLines.push(`  PARTIAL SELL ${holding.ticker}: gap-fill protection (${gapPct.toFixed(1)}% gap)`);
+                    const fresh = await getPortfolioStatus();
+                    await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
+                    totalEquity -= sellShares * price;
+                    continue;
+                }
+            }
+        } catch (e) { console.error(`[Engine] Gap check failed for ${holding.ticker}`, e); }
+
+        // ─── 2c. Scaled Partial Profit Taking ───
 
         // +2% → sell 33% (first partial)
         if (returnPct >= 2 && partialSells === 0 && holding.shares > 1) {
@@ -192,7 +229,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // ─── 2c. ADX Trend Death + Time Exit ───
+        // ─── 2d. ADX Trend Death + Time Exit ───
         // If held > 2 days, trend is dying (ADX < 15), and position is flat/red → exit
         if (daysHeld > 2 && returnPct < 1) {
             const signal = await analyzeTicker(holding.ticker);
@@ -209,7 +246,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             }
         }
 
-        // ─── 2d. Full Analysis Sell Signal ───
+        // ─── 2e. Full Analysis Sell Signal ───
         // Only run full analysis if not already handled above
         if (type !== 'PORTFOLIO_CHECK' || daysHeld > 1) {
             const signal = await analyzeTicker(holding.ticker);
