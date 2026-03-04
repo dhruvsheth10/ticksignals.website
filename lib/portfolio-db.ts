@@ -373,11 +373,12 @@ export async function savePortfolioSnapshot(): Promise<void> {
 
 /**
  * Get detailed portfolio history with variable granularity based on timeframe.
- *   - 1D:  all snapshots from the last 24h (every cycle = ~20min intervals)
- *   - 1W:  snapshots sampled roughly every hour for 7 days
- *   - 30D: daily history (portfolio_history table) + today's snapshots appended
+ *   - 1D:   all snapshots from the last 24h (every cycle = ~20min intervals)
+ *   - 1W:   snapshots sampled roughly every hour for 7 days
+ *   - 30D:  one point per calendar day for the last 30 days (fills gaps with last known value)
+ *   - ALL:  one point per calendar day from Jan 1 2026 to today (fills gaps with last known value)
  */
-export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promise<PortfolioSnapshot[]> {
+export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL'): Promise<PortfolioSnapshot[]> {
     const db = getTurso();
     const now = new Date();
 
@@ -415,35 +416,71 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promis
         return downsampleByInterval(allRows, 60 * 60 * 1000);
     }
 
-    // 30D: use daily history for last 30 days + append today's snapshots
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    // ── 30D / ALL: daily fill-forward logic ──
+    const INITIAL_VALUE = 100000;
+    const startDate = timeframe === 'ALL'
+        ? new Date('2026-01-01T00:00:00Z')
+        : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    // Fetch ALL portfolio_history rows (we need them all for carry-forward even on 30D)
     const histR = await db.execute({
-        sql: `SELECT date, total_value, cash_balance, equity_value
-              FROM portfolio_history WHERE date >= ? ORDER BY date ASC`,
-        args: [thirtyDaysAgo]
+        sql: `SELECT date, total_value, cash_balance, equity_value FROM portfolio_history ORDER BY date ASC`,
+        args: []
     });
-    const dailyPoints: PortfolioSnapshot[] = [];
+
+    // Build a map of YYYY-MM-DD → data from portfolio_history
+    const dailyMap = new Map<string, { total_value: number; cash_balance: number; equity_value: number }>();
     for (const row of histR.rows as any[]) {
-        const ts = normalizeDateToISO(row.date);
-        if (!ts) continue; // skip unparseable dates
-        dailyPoints.push({
-            timestamp: ts,
+        const iso = normalizeDateToISO(row.date);
+        if (!iso) continue;
+        const dayKey = iso.slice(0, 10);
+        dailyMap.set(dayKey, {
             total_value: row.total_value,
             cash_balance: row.cash_balance,
             equity_value: row.equity_value,
         });
     }
-    // Sort by timestamp to handle inconsistent date formats
-    dailyPoints.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-    // Append today's snapshots (sampled every 4 hours)
+    // Fill every calendar day from startDate to today, carrying forward the last known value
+    const result: PortfolioSnapshot[] = [];
+    const todayStr = now.toISOString().slice(0, 10);
+    let lastKnown = { total_value: INITIAL_VALUE, cash_balance: INITIAL_VALUE, equity_value: 0 };
+
+    // Pre-seed lastKnown with any data before the start date (for carry-forward)
+    const sortedDays = Array.from(dailyMap.keys()).sort();
+    for (const dk of sortedDays) {
+        if (dk < startDate.toISOString().slice(0, 10)) {
+            lastKnown = dailyMap.get(dk)!;
+        }
+    }
+
+    const cursor = new Date(startDate);
+    cursor.setUTCHours(16, 0, 0, 0); // 4pm UTC (~market close)
+    while (cursor.toISOString().slice(0, 10) <= todayStr) {
+        const dayKey = cursor.toISOString().slice(0, 10);
+        const entry = dailyMap.get(dayKey);
+        if (entry) {
+            lastKnown = entry;
+        }
+        // Don't add today — we'll append live snapshots below
+        if (dayKey !== todayStr) {
+            result.push({
+                timestamp: cursor.toISOString(),
+                total_value: lastKnown.total_value,
+                cash_balance: lastKnown.cash_balance,
+                equity_value: lastKnown.equity_value,
+            });
+        }
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+
+    // Append today's live snapshots (sampled every 4 hours for 30D, every 2 hours for ALL)
     const todayStart = new Date(now);
     todayStart.setHours(0, 0, 0, 0);
-    const todayCutoff = todayStart.toISOString();
     const todayR = await db.execute({
         sql: `SELECT timestamp, total_value, cash_balance, equity_value
               FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
-        args: [todayCutoff]
+        args: [todayStart.toISOString()]
     });
     const todaySnapshots: PortfolioSnapshot[] = (todayR.rows as any[]).map(row => ({
         timestamp: row.timestamp,
@@ -451,12 +488,22 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D'): Promis
         cash_balance: row.cash_balance,
         equity_value: row.equity_value,
     }));
-    const todaySampled = downsampleByInterval(todaySnapshots, 4 * 60 * 60 * 1000);
+    const sampleInterval = timeframe === 'ALL' ? 8 * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
+    const todaySampled = downsampleByInterval(todaySnapshots, sampleInterval);
 
-    // Merge, dedup by removing daily rows for today (we have live snapshots instead)
-    const todayDate = now.toISOString().slice(0, 10);
-    const filteredDaily = dailyPoints.filter(p => !p.timestamp.startsWith(todayDate));
-    return [...filteredDaily, ...todaySampled];
+    // If no live snapshots, add one point for today from last known
+    if (todaySampled.length === 0) {
+        result.push({
+            timestamp: new Date(todayStr + 'T16:00:00Z').toISOString(),
+            total_value: lastKnown.total_value,
+            cash_balance: lastKnown.cash_balance,
+            equity_value: lastKnown.equity_value,
+        });
+    } else {
+        result.push(...todaySampled);
+    }
+
+    return result;
 }
 
 /**

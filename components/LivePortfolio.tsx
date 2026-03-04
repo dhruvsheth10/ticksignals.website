@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea, ReferenceLine } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText, TrendingUp, TrendingDown } from 'lucide-react';
 import BlurText from './BlurText';
 import AnimatedNumber from './AnimatedNumber';
@@ -37,11 +37,14 @@ interface PortfolioData {
         '1D': { timestamp: string; total_value: number }[];
         '1W': { timestamp: string; total_value: number }[];
         '30D': { timestamp: string; total_value: number }[];
+        'ALL': { timestamp: string; total_value: number }[];
     };
 }
 
+type Timeframe = '1D' | '1W' | '30D' | 'ALL';
+
 interface LivePortfolioProps {
-    initialTimeframe?: '1D' | '1W' | '30D';
+    initialTimeframe?: Timeframe;
 }
 
 const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T') ? d + 'Z' : d.replace(' ', 'T') + 'Z'));
@@ -49,7 +52,7 @@ const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T')
 const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
-    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D'>(initialTimeframe);
+    const [timeframe, setTimeframe] = useState<Timeframe>(initialTimeframe);
     const [showAdminLogs, setShowAdminLogs] = useState(false);
     const [adminPassword, setAdminPassword] = useState('');
     const [adminLoading, setAdminLoading] = useState(false);
@@ -140,6 +143,40 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                 : data.history;
     }, [data, timeframe]);
 
+    // Determine if the chart period is positive (Robinhood-style green/red)
+    const chartIsPositive = useMemo(() => {
+        if (chartData.length < 2) return true;
+        return chartData[chartData.length - 1].total_value >= chartData[0].total_value;
+    }, [chartData]);
+
+    // Period P&L flash banner (shows for 10s on timeframe switch)
+    const [periodPnL, setPeriodPnL] = useState<{
+        label: string;
+        changeDollar: number;
+        changePct: number;
+        visible: boolean;
+    } | null>(null);
+    const periodPnLTimer = useRef<NodeJS.Timeout | null>(null);
+
+    useEffect(() => {
+        if (chartData.length < 2) return;
+        const first = chartData[0].total_value;
+        const last = chartData[chartData.length - 1].total_value;
+        const changeDollar = last - first;
+        const changePct = first > 0 ? ((last - first) / first) * 100 : 0;
+        const labels: Record<string, string> = { '1D': 'Today', '1W': 'Past Week', '30D': 'Past Month', 'ALL': 'All Time' };
+
+        setPeriodPnL({ label: labels[timeframe] || timeframe, changeDollar, changePct, visible: true });
+
+        // Clear any existing timer
+        if (periodPnLTimer.current) clearTimeout(periodPnLTimer.current);
+        periodPnLTimer.current = setTimeout(() => {
+            setPeriodPnL(prev => prev ? { ...prev, visible: false } : null);
+        }, 10_000);
+
+        return () => { if (periodPnLTimer.current) clearTimeout(periodPnLTimer.current); };
+    }, [chartData, timeframe]);
+
     // Drag handlers for range selection
     const handleMouseDown = useCallback((e: any) => {
         if (e && e.activeLabel) {
@@ -199,6 +236,9 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
             if (isNaN(d.getTime())) return dateStr;
             if (timeframe === '1D') {
                 return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+            }
+            if (timeframe === 'ALL' || timeframe === '30D') {
+                return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
             }
             return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
         };
@@ -290,17 +330,17 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                     <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-lg font-bold text-white">Portfolio Growth</h3>
-                            <div className="flex gap-2 bg-gray-900/50 p-1 rounded-lg">
-                                {['1D', '1W', '30D'].map(tf => (
+                            <div className="flex gap-1 bg-gray-900/50 p-1 rounded-lg">
+                                {(['1D', '1W', '30D', 'ALL'] as const).map(tf => (
                                     <button
                                         key={tf}
-                                        onClick={() => setTimeframe(tf as '1D' | '1W' | '30D')}
+                                        onClick={() => setTimeframe(tf)}
                                         className={`px-3 py-1 rounded text-sm font-medium transition-colors ${timeframe === tf
                                             ? 'bg-aquamarine-500/20 text-aquamarine-400 border border-aquamarine-500/30'
                                             : 'text-gray-400 hover:text-white hover:bg-gray-800'
                                             }`}
                                     >
-                                        {tf}
+                                        {tf === '30D' ? '1M' : tf}
                                     </button>
                                 ))}
                             </div>
@@ -327,8 +367,23 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                             </div>
                         )}
 
+                        {/* Period P&L flash banner */}
+                        {periodPnL && periodPnL.visible && !selectionInfo && (
+                            <div className="mb-3 flex items-center gap-3 bg-gray-900/60 border border-gray-700/40 rounded-lg px-4 py-2 transition-opacity duration-700"
+                                style={{ animation: 'fadeInOut 10s ease-in-out forwards' }}>
+                                <span className="text-xs text-gray-400 font-medium">{periodPnL.label}</span>
+                                <span className={`text-sm font-bold flex items-center gap-1 ${periodPnL.changeDollar >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    {periodPnL.changeDollar >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                                    {periodPnL.changeDollar >= 0 ? '+' : ''}${Math.abs(periodPnL.changeDollar).toFixed(2)}
+                                </span>
+                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${periodPnL.changePct >= 0 ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'}`}>
+                                    {periodPnL.changePct >= 0 ? '+' : ''}{periodPnL.changePct.toFixed(2)}%
+                                </span>
+                            </div>
+                        )}
+
                         <div className="text-[10px] text-gray-500 mb-1 select-none">
-                            {!selectionInfo && 'Click and drag on the chart to compare two points'}
+                            {!selectionInfo && !periodPnL?.visible && 'Click and drag on the chart to compare two points'}
                         </div>
 
                         <div
@@ -345,9 +400,13 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     onMouseUp={handleMouseUp}
                                 >
                                     <defs>
-                                        <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                                        <linearGradient id="colorValueUp" x1="0" y1="0" x2="0" y2="1">
                                             <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
                                             <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                        </linearGradient>
+                                        <linearGradient id="colorValueDown" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} />
+                                            <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                                         </linearGradient>
                                     </defs>
                                     <XAxis
@@ -361,10 +420,14 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             if (timeframe === '1W') {
                                                 return d.toLocaleDateString(undefined, { weekday: 'short', hour: 'numeric' });
                                             }
+                                            if (timeframe === 'ALL') {
+                                                return d.toLocaleDateString(undefined, { month: 'short' });
+                                            }
                                             return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
                                         }}
                                         stroke="#4b5563"
                                         fontSize={12}
+                                        interval={timeframe === 'ALL' ? Math.max(1, Math.floor(chartData.length / 8)) : undefined}
                                     />
                                     <YAxis
                                         domain={['auto', 'auto']}
@@ -374,7 +437,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     />
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }}
-                                        itemStyle={{ color: '#10b981' }}
+                                        itemStyle={{ color: chartIsPositive ? '#10b981' : '#ef4444' }}
                                         formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString()}`, 'Value'] as [string, string]}
                                         labelFormatter={(label) => {
                                             const d = parseDate(label);
@@ -385,9 +448,21 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             if (timeframe === '1W') {
                                                 return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
                                             }
-                                            return d.toLocaleDateString();
+                                            if (timeframe === 'ALL') {
+                                                return d.toLocaleDateString(undefined, { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
+                                            }
+                                            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
                                         }}
                                     />
+                                    {/* $100k reference line for ALL view */}
+                                    {timeframe === 'ALL' && (
+                                        <ReferenceLine
+                                            y={100000}
+                                            stroke="#6b7280"
+                                            strokeDasharray="4 4"
+                                            strokeWidth={1}
+                                        />
+                                    )}
                                     {/* Highlighted selection region */}
                                     {refAreaLeft && refAreaRight && (
                                         <ReferenceArea
@@ -402,10 +477,10 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     <Area
                                         type="monotone"
                                         dataKey="total_value"
-                                        stroke="#10b981"
+                                        stroke={chartIsPositive ? '#10b981' : '#ef4444'}
                                         strokeWidth={2}
                                         fillOpacity={1}
-                                        fill="url(#colorValue)"
+                                        fill={chartIsPositive ? 'url(#colorValueUp)' : 'url(#colorValueDown)'}
                                         activeDot={{ stroke: 'none', r: 4 }}
                                         style={{ outline: 'none' }}
                                     />

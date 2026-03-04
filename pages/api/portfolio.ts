@@ -10,7 +10,7 @@ export default async function handler(
     try {
         await initPortfolioTables();
 
-        const [status, holdings, transactionsRaw, history, screenerData, detail1D, detail1W, detail30D] = await Promise.all([
+        const [status, holdings, transactionsRaw, history, screenerData, detail1D, detail1W, detail30D, detailALL] = await Promise.all([
             getPortfolioStatus(),
             getHoldings(),
             getTransactions(50),
@@ -19,6 +19,7 @@ export default async function handler(
             getDetailedHistory('1D'),
             getDetailedHistory('1W'),
             getDetailedHistory('30D'),
+            getDetailedHistory('ALL'),
         ]);
 
         const companyMap = new Map(screenerData.map(d => [d.ticker, d.company_name]));
@@ -37,6 +38,7 @@ export default async function handler(
                 '1D': detail1D,
                 '1W': detail1W,
                 '30D': detail30D,
+                'ALL': detailALL,
             },
         });
     } catch (error: any) {
