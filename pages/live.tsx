@@ -7,7 +7,7 @@ import Navigation from '../components/Navigation';
 import ShinyText from '../components/ShinyText';
 import CloudStatus from '../components/CloudStatus';
 
-type Timeframe = '1D' | '1W' | '30D' | 'ALL';
+type Timeframe = '1D' | '1W' | '30D';
 
 export default function Live() {
     const router = useRouter();
@@ -20,8 +20,7 @@ export default function Live() {
             if (timeframe) {
                 const tf = (timeframe as string).toLowerCase();
                 if (tf === '7d' || tf === '1w') setInitialTimeframe('1W');
-                else if (tf === '30d' || tf === '1m') setInitialTimeframe('30D');
-                else if (tf === 'all') setInitialTimeframe('ALL');
+                else if (tf === '30d' || tf === '1m' || tf === 'all') setInitialTimeframe('30D');
                 else setInitialTimeframe('1D');
             }
             setReady(true);

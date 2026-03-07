@@ -873,3 +873,28 @@ export async function cleanupOldLogs(): Promise<{ cycles: number; analysis: numb
         analysis: r2.rowsAffected
     };
 }
+
+/**
+ * Get each ticker's market open price for today from intraday_holdings.
+ * Returns a map of ticker → open price (earliest bar of the day).
+ */
+export async function getDayOpenPrices(): Promise<Map<string, number>> {
+    const db = getTurso();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayCutoff = today.toISOString().slice(0, 10);
+
+    const r = await db.execute({
+        sql: `SELECT ticker, open, bar_time FROM intraday_holdings
+              WHERE bar_time >= ? ORDER BY bar_time ASC`,
+        args: [todayCutoff]
+    });
+
+    const dayOpens = new Map<string, number>();
+    for (const row of r.rows as any[]) {
+        if (!dayOpens.has(row.ticker)) {
+            dayOpens.set(row.ticker, row.open);
+        }
+    }
+    return dayOpens;
+}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea, ReferenceLine } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText, TrendingUp, TrendingDown } from 'lucide-react';
 import BlurText from './BlurText';
 import AnimatedNumber from './AnimatedNumber';
@@ -19,6 +19,8 @@ interface PortfolioData {
         current_price: number;
         market_value: number;
         return_pct: number;
+        day_change_pct: number | null;
+        total_return_dollar: number;
     }[];
     transactions: {
         date: string;
@@ -28,6 +30,7 @@ interface PortfolioData {
         price: number;
         total_amount: number;
         company_name?: string | null;
+        notes?: string;
     }[];
     history: {
         date: string;
@@ -37,22 +40,91 @@ interface PortfolioData {
         '1D': { timestamp: string; total_value: number }[];
         '1W': { timestamp: string; total_value: number }[];
         '30D': { timestamp: string; total_value: number }[];
-        'ALL': { timestamp: string; total_value: number }[];
     };
 }
 
-type Timeframe = '1D' | '1W' | '30D' | 'ALL';
-
 interface LivePortfolioProps {
-    initialTimeframe?: Timeframe;
+    initialTimeframe?: '1D' | '1W' | '30D';
 }
 
+type ReturnMode = 'total_pct' | 'day_pct' | 'total_dollar';
+const RETURN_LABELS: Record<ReturnMode, string> = {
+    total_pct: 'Total Return %',
+    day_pct: "Today's Return %",
+    total_dollar: 'Total Return ($)',
+};
+const RETURN_CYCLE: ReturnMode[] = ['total_pct', 'day_pct', 'total_dollar'];
+
 const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T') ? d + 'Z' : d.replace(' ', 'T') + 'Z'));
+
+/**
+ * Extract the return % from a SELL transaction's notes.
+ * Handles: Partial Profit, Full Profit Exit, Hard Stop, Trend Exit, Gap-Down Exit, Gap-Fill Protect.
+ * Returns null if not parseable (e.g. trailing stops without explicit %).
+ */
+function parseSellReturnFromNotes(notes?: string): number | null {
+    if (!notes) return null;
+
+    // "Partial Profit +2% (1/3 position, 2.1%)"
+    let match = notes.match(/position,\s*([-+]?\d+\.?\d*)%\)/);
+    if (match) return parseFloat(match[1]);
+
+    // "Full Profit Exit +6% (6.7%)"
+    match = notes.match(/Exit\s*\+\d+%\s*\(([-+]?\d+\.?\d*)%\)/);
+    if (match) return parseFloat(match[1]);
+
+    // "Hard Stop -5%: -5.5% (cost $133.51)"
+    match = notes.match(/Hard Stop.*?:\s*([-+]?\d+\.?\d*)%/);
+    if (match) return parseFloat(match[1]);
+
+    // "Trend Exit: ADX 13, 7.0d held, -0.1%"
+    match = notes.match(/Trend Exit:[^,]+,[^,]+,\s*([-+]?\d+\.?\d*)%/);
+    if (match) return parseFloat(match[1]);
+
+    // "Gap-Down Exit: -3.2% gap, position at -1.5%"
+    match = notes.match(/position at\s*([-+]?\d+\.?\d*)%/);
+    if (match) return parseFloat(match[1]);
+
+    // "Gap-Fill Protect: 3.5% gap filling, locking 33% at 2.5%"
+    match = notes.match(/locking.*?at\s*([-+]?\d+\.?\d*)%/);
+    if (match) return parseFloat(match[1]);
+
+    // Trailing Stop — try to extract cost from other notes or compute from matched buy
+    // "Trailing Stop: Price $40.98 < Trail $41.02 (HWM $43.54, ATR $1.26)"
+    // Can't determine return without cost basis — return null
+    return null;
+}
+
+/**
+ * For trailing stops, compute return by matching against BUY transactions for the same ticker.
+ */
+function computeSellReturn(
+    tx: { ticker: string; price: number; notes?: string },
+    allTransactions: { ticker: string; type: string; price: number; date: string }[]
+): number | null {
+    // First try parsing from notes
+    const fromNotes = parseSellReturnFromNotes(tx.notes);
+    if (fromNotes !== null) return fromNotes;
+
+    // Fallback: find the most recent BUY for this ticker that happened before this sell
+    const buys = allTransactions
+        .filter(t => t.ticker === tx.ticker && t.type === 'BUY')
+        .sort((a, b) => b.date.localeCompare(a.date)); // newest first
+
+    if (buys.length > 0) {
+        const avgCost = buys[0].price; // Use most recent buy's price as cost basis
+        return ((tx.price - avgCost) / avgCost) * 100;
+    }
+
+    return null;
+}
+
 
 const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
-    const [timeframe, setTimeframe] = useState<Timeframe>(initialTimeframe);
+    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D'>(initialTimeframe);
+    const [returnMode, setReturnMode] = useState<ReturnMode>('total_pct');
     const [showAdminLogs, setShowAdminLogs] = useState(false);
     const [adminPassword, setAdminPassword] = useState('');
     const [adminLoading, setAdminLoading] = useState(false);
@@ -77,8 +149,10 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         endLabel: string;
     } | null>(null);
 
+    // Chart fade transition
+    const [chartVisible, setChartVisible] = useState(true);
+
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
-    const isFirstLoad = useRef(true);
 
     const fetchPortfolio = useCallback(async (silent = false) => {
         try {
@@ -96,12 +170,8 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     // Initial fetch + polling every 30s
     useEffect(() => {
         fetchPortfolio();
+        pollInterval.current = setInterval(() => fetchPortfolio(true), 30_000);
 
-        pollInterval.current = setInterval(() => {
-            fetchPortfolio(true); // silent refresh, no loading spinner
-        }, 30_000);
-
-        // Pause polling when tab is hidden, resume when visible
         const handleVisibility = () => {
             if (document.hidden) {
                 if (pollInterval.current) clearInterval(pollInterval.current);
@@ -118,11 +188,17 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         };
     }, [fetchPortfolio]);
 
-    // Clear selection whenever timeframe changes
-    useEffect(() => {
+    // Smooth transition on timeframe change
+    const handleTimeframeChange = useCallback((tf: '1D' | '1W' | '30D') => {
+        if (tf === timeframe) return;
+        setChartVisible(false);
         setSelectionInfo(null);
         setRefAreaLeft(null);
         setRefAreaRight(null);
+        setTimeout(() => {
+            setTimeframe(tf);
+            setChartVisible(true);
+        }, 200);
     }, [timeframe]);
 
     // Build chart data
@@ -137,45 +213,22 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                 }));
             }
         }
-        // Fallback to legacy daily history
         return timeframe === '1D' ? data.history.slice(-2)
             : timeframe === '1W' ? data.history.slice(-7)
                 : data.history;
     }, [data, timeframe]);
 
-    // Determine if the chart period is positive (Robinhood-style green/red)
-    const chartIsPositive = useMemo(() => {
-        if (chartData.length < 2) return true;
-        return chartData[chartData.length - 1].total_value >= chartData[0].total_value;
+    // Compute timeframe P&L (persistent display)
+    const timeframePnL = useMemo(() => {
+        if (chartData.length < 2) return null;
+        const first = chartData[0];
+        const last = chartData[chartData.length - 1];
+        const changeDollar = last.total_value - first.total_value;
+        const changePct = first.total_value > 0
+            ? ((last.total_value - first.total_value) / first.total_value) * 100
+            : 0;
+        return { changeDollar, changePct };
     }, [chartData]);
-
-    // Period P&L flash banner (shows for 10s on timeframe switch)
-    const [periodPnL, setPeriodPnL] = useState<{
-        label: string;
-        changeDollar: number;
-        changePct: number;
-        visible: boolean;
-    } | null>(null);
-    const periodPnLTimer = useRef<NodeJS.Timeout | null>(null);
-
-    useEffect(() => {
-        if (chartData.length < 2) return;
-        const first = chartData[0].total_value;
-        const last = chartData[chartData.length - 1].total_value;
-        const changeDollar = last - first;
-        const changePct = first > 0 ? ((last - first) / first) * 100 : 0;
-        const labels: Record<string, string> = { '1D': 'Today', '1W': 'Past Week', '30D': 'Past Month', 'ALL': 'All Time' };
-
-        setPeriodPnL({ label: labels[timeframe] || timeframe, changeDollar, changePct, visible: true });
-
-        // Clear any existing timer
-        if (periodPnLTimer.current) clearTimeout(periodPnLTimer.current);
-        periodPnLTimer.current = setTimeout(() => {
-            setPeriodPnL(prev => prev ? { ...prev, visible: false } : null);
-        }, 10_000);
-
-        return () => { if (periodPnLTimer.current) clearTimeout(periodPnLTimer.current); };
-    }, [chartData, timeframe]);
 
     // Drag handlers for range selection
     const handleMouseDown = useCallback((e: any) => {
@@ -202,8 +255,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
 
         const left = refAreaLeft;
         const right = refAreaRight || refAreaLeft;
-
-        // Find the indices
         const leftIdx = chartData.findIndex(d => d.date === left);
         const rightIdx = chartData.findIndex(d => d.date === right);
 
@@ -217,7 +268,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         const endIdx = Math.max(leftIdx, rightIdx);
 
         if (startIdx === endIdx) {
-            // Just a click, clear selection
             setRefAreaLeft(null);
             setRefAreaRight(null);
             setSelectionInfo(null);
@@ -237,9 +287,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
             if (timeframe === '1D') {
                 return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
             }
-            if (timeframe === 'ALL' || timeframe === '30D') {
-                return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-            }
             return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
         };
 
@@ -252,7 +299,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
             endLabel: formatLabel(endPoint.date),
         });
 
-        // Keep the refArea visible to highlight the selection
         setRefAreaLeft(chartData[startIdx].date);
         setRefAreaRight(chartData[endIdx].date);
     }, [isDragging, refAreaLeft, refAreaRight, chartData, timeframe]);
@@ -282,7 +328,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         <div className="space-y-6 animate-fade-in">
             {/* Top Summary Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Total Value Card */}
                 <div className="bg-gray-800 rounded-xl p-6 relative overflow-hidden transition-colors border border-gray-700 hover:border-gray-500">
                     <h3 className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-2">
                         <Activity size={16} /> Total Portfolio Value
@@ -296,7 +341,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                     <p className="text-xs text-gray-500 mt-2">Started with $100,000.00</p>
                 </div>
 
-                {/* Cash vs Equity */}
                 <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 flex flex-col justify-center">
                     <div className="flex justify-between items-center mb-2">
                         <span className="text-gray-400 text-sm">Cash Balance</span>
@@ -314,7 +358,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                     </div>
                 </div>
 
-                {/* Quick Stats */}
                 <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 flex flex-col justify-center items-center text-center">
                     <PieChart className="w-8 h-8 text-aquamarine-400 mb-2" />
                     <div className="text-2xl font-bold text-white">{data.holdings.length}</div>
@@ -323,24 +366,39 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Left Column: Chart & Holdings (2/3 width) */}
                 <div className="lg:col-span-2 space-y-6">
 
                     {/* Chart Section */}
                     <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
-                        <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-lg font-bold text-white">Portfolio Growth</h3>
-                            <div className="flex gap-1 bg-gray-900/50 p-1 rounded-lg">
-                                {(['1D', '1W', '30D', 'ALL'] as const).map(tf => (
+                        <div className="flex justify-between items-center mb-3">
+                            <div>
+                                <h3 className="text-lg font-bold text-white">Portfolio Growth</h3>
+                                {/* Persistent timeframe P&L */}
+                                {timeframePnL && (
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <span className={`text-sm font-semibold ${timeframePnL.changeDollar >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                            {timeframePnL.changeDollar >= 0 ? '+' : ''}${timeframePnL.changeDollar.toFixed(2)}
+                                        </span>
+                                        <span className={`text-xs font-medium px-1.5 py-0.5 rounded-full ${timeframePnL.changePct >= 0 ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                                            {timeframePnL.changePct >= 0 ? '+' : ''}{timeframePnL.changePct.toFixed(3)}%
+                                        </span>
+                                        <span className="text-xs text-gray-500 ml-1">
+                                            {timeframe === '1D' ? 'Today' : timeframe === '1W' ? 'Past 7 Days' : 'Past 30 Days'}
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex gap-2 bg-gray-900/50 p-1 rounded-lg">
+                                {(['1D', '1W', '30D'] as const).map(tf => (
                                     <button
                                         key={tf}
-                                        onClick={() => setTimeframe(tf)}
+                                        onClick={() => handleTimeframeChange(tf)}
                                         className={`px-3 py-1 rounded text-sm font-medium transition-colors ${timeframe === tf
                                             ? 'bg-aquamarine-500/20 text-aquamarine-400 border border-aquamarine-500/30'
                                             : 'text-gray-400 hover:text-white hover:bg-gray-800'
                                             }`}
                                     >
-                                        {tf === '30D' ? '1M' : tf}
+                                        {tf}
                                     </button>
                                 ))}
                             </div>
@@ -348,7 +406,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
 
                         {/* Selection Info Banner */}
                         {selectionInfo && (
-                            <div className="mb-3 flex items-center justify-between bg-gray-900/80 border border-gray-600/50 rounded-lg px-4 py-2.5 animate-fade-in">
+                            <div className="mb-3 flex items-center justify-between bg-gray-900/80 border border-gray-600/50 rounded-lg px-4 py-2.5">
                                 <div className="flex items-center gap-4">
                                     <div className="text-xs text-gray-400">
                                         {selectionInfo.startLabel} → {selectionInfo.endLabel}
@@ -367,28 +425,20 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                             </div>
                         )}
 
-                        {/* Period P&L flash banner */}
-                        {periodPnL && periodPnL.visible && !selectionInfo && (
-                            <div className="mb-3 flex items-center gap-3 bg-gray-900/60 border border-gray-700/40 rounded-lg px-4 py-2 transition-opacity duration-700"
-                                style={{ animation: 'fadeInOut 10s ease-in-out forwards' }}>
-                                <span className="text-xs text-gray-400 font-medium">{periodPnL.label}</span>
-                                <span className={`text-sm font-bold flex items-center gap-1 ${periodPnL.changeDollar >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                    {periodPnL.changeDollar >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-                                    {periodPnL.changeDollar >= 0 ? '+' : ''}${Math.abs(periodPnL.changeDollar).toFixed(2)}
-                                </span>
-                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${periodPnL.changePct >= 0 ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'}`}>
-                                    {periodPnL.changePct >= 0 ? '+' : ''}{periodPnL.changePct.toFixed(2)}%
-                                </span>
+                        {!selectionInfo && (
+                            <div className="text-[10px] text-gray-500 mb-1 select-none">
+                                Click and drag on the chart to compare two points
                             </div>
                         )}
 
-                        <div className="text-[10px] text-gray-500 mb-1 select-none">
-                            {!selectionInfo && !periodPnL?.visible && 'Click and drag on the chart to compare two points'}
-                        </div>
-
                         <div
                             className="h-[300px] w-full select-none"
-                            style={{ outline: 'none', cursor: isDragging ? 'col-resize' : 'crosshair' }}
+                            style={{
+                                outline: 'none',
+                                cursor: isDragging ? 'col-resize' : 'crosshair',
+                                opacity: chartVisible ? 1 : 0,
+                                transition: 'opacity 0.2s ease-in-out',
+                            }}
                             onMouseLeave={() => { if (isDragging) handleMouseUp(); }}
                         >
                             <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
@@ -400,13 +450,9 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     onMouseUp={handleMouseUp}
                                 >
                                     <defs>
-                                        <linearGradient id="colorValueUp" x1="0" y1="0" x2="0" y2="1">
+                                        <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
                                             <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
                                             <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                                        </linearGradient>
-                                        <linearGradient id="colorValueDown" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} />
-                                            <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
                                         </linearGradient>
                                     </defs>
                                     <XAxis
@@ -420,14 +466,10 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             if (timeframe === '1W') {
                                                 return d.toLocaleDateString(undefined, { weekday: 'short', hour: 'numeric' });
                                             }
-                                            if (timeframe === 'ALL') {
-                                                return d.toLocaleDateString(undefined, { month: 'short' });
-                                            }
                                             return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
                                         }}
                                         stroke="#4b5563"
                                         fontSize={12}
-                                        interval={timeframe === 'ALL' ? Math.max(1, Math.floor(chartData.length / 8)) : undefined}
                                     />
                                     <YAxis
                                         domain={['auto', 'auto']}
@@ -437,7 +479,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     />
                                     <Tooltip
                                         contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }}
-                                        itemStyle={{ color: chartIsPositive ? '#10b981' : '#ef4444' }}
+                                        itemStyle={{ color: '#10b981' }}
                                         formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString()}`, 'Value'] as [string, string]}
                                         labelFormatter={(label) => {
                                             const d = parseDate(label);
@@ -448,22 +490,9 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             if (timeframe === '1W') {
                                                 return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
                                             }
-                                            if (timeframe === 'ALL') {
-                                                return d.toLocaleDateString(undefined, { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
-                                            }
-                                            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+                                            return d.toLocaleDateString();
                                         }}
                                     />
-                                    {/* $100k reference line for ALL view */}
-                                    {timeframe === 'ALL' && (
-                                        <ReferenceLine
-                                            y={100000}
-                                            stroke="#6b7280"
-                                            strokeDasharray="4 4"
-                                            strokeWidth={1}
-                                        />
-                                    )}
-                                    {/* Highlighted selection region */}
                                     {refAreaLeft && refAreaRight && (
                                         <ReferenceArea
                                             x1={refAreaLeft}
@@ -477,12 +506,13 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     <Area
                                         type="monotone"
                                         dataKey="total_value"
-                                        stroke={chartIsPositive ? '#10b981' : '#ef4444'}
+                                        stroke="#10b981"
                                         strokeWidth={2}
                                         fillOpacity={1}
-                                        fill={chartIsPositive ? 'url(#colorValueUp)' : 'url(#colorValueDown)'}
+                                        fill="url(#colorValue)"
                                         activeDot={{ stroke: 'none', r: 4 }}
                                         style={{ outline: 'none' }}
+                                        isAnimationActive={false}
                                     />
                                 </AreaChart>
                             </ResponsiveContainer>
@@ -503,7 +533,18 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                         <th className="p-4 font-medium text-right">Avg Cost</th>
                                         <th className="p-4 font-medium text-right">Price</th>
                                         <th className="p-4 font-medium text-right">Value</th>
-                                        <th className="p-4 font-medium text-right">Return</th>
+                                        <th
+                                            className="p-4 font-medium text-right cursor-pointer select-none group"
+                                            onClick={() => setReturnMode(prev => RETURN_CYCLE[(RETURN_CYCLE.indexOf(prev) + 1) % RETURN_CYCLE.length])}
+                                            title="Click to toggle between Total Return %, Today's Return %, Total Return ($)"
+                                        >
+                                            <span className="inline-flex items-center gap-1 group-hover:text-aquamarine-400 transition-colors">
+                                                {RETURN_LABELS[returnMode]}
+                                                <svg className="w-3 h-3 opacity-50 group-hover:opacity-100 transition-opacity" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2">
+                                                    <path d="M3 5l3-3 3 3M3 7l3 3 3-3" />
+                                                </svg>
+                                            </span>
+                                        </th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-700/50">
@@ -515,7 +556,29 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                         </tr>
                                     ) : (
                                         data.holdings.map((h) => {
-                                            const isProfitable = h.return_pct >= 0;
+                                            let displayValue: number;
+                                            let prefix = '';
+                                            let suffix = '';
+                                            let isProfitable: boolean;
+
+                                            if (returnMode === 'total_pct') {
+                                                displayValue = h.return_pct;
+                                                isProfitable = displayValue >= 0;
+                                                prefix = isProfitable ? '+' : '';
+                                                suffix = '%';
+                                            } else if (returnMode === 'day_pct') {
+                                                displayValue = h.day_change_pct ?? 0;
+                                                isProfitable = displayValue >= 0;
+                                                prefix = isProfitable ? '+' : '';
+                                                suffix = '%';
+                                            } else {
+                                                displayValue = h.total_return_dollar;
+                                                isProfitable = displayValue >= 0;
+                                                prefix = isProfitable ? '+$' : '-$';
+                                                displayValue = Math.abs(displayValue);
+                                                suffix = '';
+                                            }
+
                                             return (
                                                 <tr key={h.ticker} className="hover:bg-gray-700/20 transition-colors">
                                                     <td className="p-4 font-bold text-white">
@@ -532,7 +595,17 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                         <AnimatedNumber value={h.market_value} prefix="$" decimals={0} className="text-white" />
                                                     </td>
                                                     <td className="p-4 text-right font-bold">
-                                                        <AnimatedNumber value={h.return_pct} prefix={isProfitable ? '+' : ''} suffix="%" decimals={2} className={isProfitable ? 'text-green-400' : 'text-red-400'} />
+                                                        {returnMode === 'day_pct' && h.day_change_pct === null ? (
+                                                            <span className="text-gray-500">—</span>
+                                                        ) : (
+                                                            <AnimatedNumber
+                                                                value={displayValue}
+                                                                prefix={prefix}
+                                                                suffix={suffix}
+                                                                decimals={returnMode === 'total_dollar' ? 0 : 2}
+                                                                className={isProfitable ? 'text-green-400' : 'text-red-400'}
+                                                            />
+                                                        )}
                                                     </td>
                                                 </tr>
                                             );
@@ -544,7 +617,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                     </div>
                 </div>
 
-                {/* Right Column: Transactions + Admin Logs (1/3 width) */}
+                {/* Right Column: Trade History */}
                 <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden flex flex-col h-full max-h-[800px]">
                     <div className="p-4 border-b border-gray-700 bg-gray-800 sticky top-0 z-10 flex items-center justify-between">
                         <h3 className="text-lg font-bold text-white flex items-center gap-2">
@@ -565,40 +638,54 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                             <div className="p-8 text-center text-gray-500">No transactions recorded yet.</div>
                         ) : (
                             <div className="divide-y divide-gray-700/50">
-                                {data.transactions.map((tx, idx) => (
-                                    <div key={idx} className="p-4 hover:bg-gray-700/20 transition-colors flex justify-between items-start">
-                                        <div>
-                                            <div className="flex items-center gap-2 mb-1">
-                                                <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                                                    }`}>
-                                                    {tx.type}
-                                                </span>
-                                                <Link href={`/analyze?ticker=${tx.ticker}`} className="font-bold text-white tracking-wide hover:text-aquamarine-400 transition-colors">
-                                                    {tx.ticker}
-                                                </Link>
-                                            </div>
-                                            {tx.company_name && (
-                                                <div className="text-xs text-gray-400 mb-0.5 max-w-[150px] truncate" title={tx.company_name}>
-                                                    {tx.company_name}
+                                {data.transactions.map((tx, idx) => {
+                                    // Compute sell return
+                                    let sellReturn: number | null = null;
+                                    if (tx.type === 'SELL') {
+                                        sellReturn = computeSellReturn(tx, data.transactions);
+                                    }
+
+                                    return (
+                                        <div key={idx} className="p-4 hover:bg-gray-700/20 transition-colors flex justify-between items-start">
+                                            <div>
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${tx.type === 'BUY' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                                        }`}>
+                                                        {tx.type}
+                                                    </span>
+                                                    <Link href={`/analyze?ticker=${tx.ticker}`} className="font-bold text-white tracking-wide hover:text-aquamarine-400 transition-colors">
+                                                        {tx.ticker}
+                                                    </Link>
                                                 </div>
-                                            )}
-                                            <div className="text-xs text-gray-500">
-                                                {parseDate(tx.date).toLocaleString(undefined, {
-                                                    month: 'short', day: 'numeric',
-                                                    hour: 'numeric', minute: 'numeric'
-                                                })}
+                                                {tx.company_name && (
+                                                    <div className="text-xs text-gray-400 mb-0.5 max-w-[150px] truncate" title={tx.company_name}>
+                                                        {tx.company_name}
+                                                    </div>
+                                                )}
+                                                <div className="text-xs text-gray-500">
+                                                    {parseDate(tx.date).toLocaleString(undefined, {
+                                                        month: 'short', day: 'numeric',
+                                                        hour: 'numeric', minute: 'numeric'
+                                                    })}
+                                                </div>
+                                            </div>
+                                            <div className="text-right">
+                                                <div className="text-sm text-gray-200">
+                                                    {tx.shares.toFixed(0)} @ ${tx.price.toFixed(2)}
+                                                </div>
+                                                <div className="text-xs text-gray-500">
+                                                    ${tx.total_amount.toLocaleString()}
+                                                </div>
+                                                {/* Sell P&L indicator */}
+                                                {tx.type === 'SELL' && sellReturn !== null && (
+                                                    <div className={`text-xs font-semibold mt-0.5 ${sellReturn >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                        {sellReturn >= 0 ? '+' : ''}{sellReturn.toFixed(2)}% ROI
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
-                                        <div className="text-right">
-                                            <div className="text-sm text-gray-200">
-                                                {tx.shares.toFixed(0)} @ ${tx.price.toFixed(2)}
-                                            </div>
-                                            <div className="text-xs text-gray-500">
-                                                ${tx.total_amount.toLocaleString()}
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         )}
                     </div>
@@ -624,9 +711,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
 
                             {!adminLogs && (
                                 <div className="p-4 border-b border-gray-800">
-                                    <p className="text-xs text-gray-400 mb-2">
-                                        Enter admin password
-                                    </p>
+                                    <p className="text-xs text-gray-400 mb-2">Enter admin password</p>
                                     <form
                                         className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center"
                                         onSubmit={async (e) => {
@@ -691,7 +776,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                         </button>
                                     </div>
 
-                                    {/* ══════════ Daily P&L Section ══════════ */}
+                                    {/* Daily P&L */}
                                     {adminLogs.dailyPnL && adminLogs.dailyPnL.length > 0 && (
                                         <div className="rounded-lg border border-gray-700/60 bg-gray-800/70 overflow-hidden">
                                             <div className="px-4 py-2.5 border-b border-gray-700/50 flex items-center gap-2">
@@ -701,7 +786,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             <div className="divide-y divide-gray-700/30">
                                                 {adminLogs.dailyPnL.map((day, idx) => {
                                                     const isUp = day.change_pct >= 0;
-                                                    const isFirst = idx === adminLogs.dailyPnL!.length - 1; // oldest day
+                                                    const isFirst = idx === adminLogs.dailyPnL!.length - 1;
                                                     return (
                                                         <div key={idx} className="px-4 py-2.5 flex items-center justify-between hover:bg-gray-700/20 transition-colors">
                                                             <div className="flex items-center gap-3">
@@ -727,7 +812,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                         </div>
                                     )}
 
-                                    {/* ══════════ Cycle Logs ══════════ */}
+                                    {/* Cycle Logs */}
                                     {adminLogs.cycleLogs && adminLogs.cycleLogs.length > 0 ? (
                                         <div className="space-y-2 mb-6">
                                             {adminLogs.cycleLogs.filter((l: any) => l.cycle_type !== 'PORTFOLIO_CHECK').map((entry: any, idx: number) => (
@@ -819,7 +904,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                         )
                                                     })}
                                                 </div>
-
                                             )}
                                         </div>
                                     </div>
@@ -832,7 +916,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         </div>
     );
 };
-// Simple Icon Component (internal to avoid extra deps if lucide not imported or mismatch)
+
 const HistoryIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 12" />
