@@ -376,17 +376,62 @@ export default async function handler(
             console.log(`[Screener] ✅ ${totalProcessed} ok, ${totalFailed} fail in ${duration}s`);
 
 
-
-            // ── Phase 4: Update Monitored Prospects (Top 35 Fundamental Picks) ──
+            // ── Phase 4: Update Monitored Prospects ──
+            // Sector-diversified, momentum-blended scoring (50 stocks).
+            //
+            // CHANGES vs v1:
+            //   1. Blends 70% fundamental score (ROE + gross margin) with 30% price
+            //      momentum (proximity to 52-week high vs low). This naturally rotates
+            //      stocks in/out as prices move day-to-day.
+            //   2. Caps at 7 stocks per sector to prevent concentration (was 100% uncapped).
+            //   3. Expanded from 35 → 50 to broaden the opportunity set.
             try {
                 const db = getPool();
                 const candidates = await db.query(`
-                    SELECT ticker, 
-                           (roe_pct + gross_margin_pct) as score 
-                    FROM screener_cache
-                    WHERE roe_pct > 12 AND gross_margin_pct > 8 AND debt_to_equity < 100 AND market_cap > 1000000000
-                    ORDER BY pe_ratio ASC, roe_pct DESC
-                    LIMIT 35
+                    WITH scored AS (
+                        SELECT 
+                            ticker,
+                            sector,
+                            roe_pct,
+                            gross_margin_pct,
+                            pe_ratio,
+                            price,
+                            fifty_two_week_high,
+                            fifty_two_week_low,
+                            -- Fundamental score (normalized to ~0-100 range)
+                            (roe_pct + gross_margin_pct) AS fund_score,
+                            -- Momentum score: how far above the 52-week low (0 = at low, 100 = at high)
+                            CASE WHEN fifty_two_week_high > fifty_two_week_low AND fifty_two_week_low > 0
+                                 THEN ((price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low)) * 100
+                                 ELSE 50 
+                            END AS momentum_score
+                        FROM screener_cache
+                        WHERE roe_pct > 10 
+                          AND gross_margin_pct > 5 
+                          AND debt_to_equity < 150 
+                          AND market_cap > 1000000000
+                          AND price IS NOT NULL
+                          AND fifty_two_week_high IS NOT NULL
+                          AND fifty_two_week_low IS NOT NULL
+                    ),
+                    blended AS (
+                        SELECT 
+                            ticker,
+                            sector,
+                            -- 70% fundamentals + 30% momentum
+                            (fund_score * 0.7 + momentum_score * 0.3) AS blended_score,
+                            -- Sector rank: cap per sector for diversification
+                            ROW_NUMBER() OVER (
+                                PARTITION BY sector 
+                                ORDER BY (fund_score * 0.7 + momentum_score * 0.3) DESC
+                            ) AS rank_in_sector
+                        FROM scored
+                    )
+                    SELECT ticker, blended_score AS score
+                    FROM blended
+                    WHERE rank_in_sector <= 7
+                    ORDER BY blended_score DESC
+                    LIMIT 50
                 `);
 
                 const prospects = candidates.rows.map((r: any) => ({

@@ -1,6 +1,6 @@
 
 import { getPool } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot, savePortfolioSnapshot, cleanupOldSnapshots } from './portfolio-db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot, savePortfolioSnapshot, cleanupOldSnapshots, getRecentStopLossSells } from './portfolio-db';
 import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
 
@@ -327,6 +327,12 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     let bought: string[] = [];
     let buyCount = 0;
 
+    // ─── Re-Entry Cooldown: prevent whipsaw (stop-loss → immediate re-buy) ───
+    let recentlyStoppedOut = new Set<string>();
+    try {
+        recentlyStoppedOut = await getRecentStopLossSells(3); // 3-day cooldown
+    } catch (e) { console.error('[Engine] Failed to fetch recent stop-loss sells', e); }
+
     for (const candidate of candidates) {
         if (buyCount >= MAX_BUYS_PER_CYCLE) break;
 
@@ -334,6 +340,14 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         if (updatedHoldings.find(h => h.ticker === candidate.ticker)) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
                 summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - already holding (skip)`);
+            }
+            continue;
+        }
+
+        // Skip if recently stopped out (3-day cooldown to prevent whipsaw)
+        if (recentlyStoppedOut.has(candidate.ticker)) {
+            if (top5.some(c => c.ticker === candidate.ticker)) {
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - cooldown (recently stopped out, skip)`);
             }
             continue;
         }
@@ -600,17 +614,19 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
 
         if (isUptrend && priceAboveTrend) {
             // 2. ADX Trend Strength (must confirm a real trend)
-            if (ind.adx > 20) {
+            // Raised minimum from 15 to 20: ADX 15-19 produced too many
+            // churn trades (buy → trend-death exit → small loss).
+            if (ind.adx > 25) {
                 buyConfidence += 15;
                 buySignals.push(`ADX ${ind.adx.toFixed(0)} (trend confirmed)`);
-            } else if (ind.adx > 15) {
-                buyConfidence += 5;
-                buySignals.push(`ADX ${ind.adx.toFixed(0)} (weak trend)`);
+            } else if (ind.adx >= 20) {
+                buyConfidence += 8;
+                buySignals.push(`ADX ${ind.adx.toFixed(0)} (trend developing)`);
             } else {
-                // ADX < 15 = choppy, skip buying
+                // ADX < 20 = choppy/weak, skip buying
                 return {
                     ticker, action: 'HOLD',
-                    reason: `ADX too low (${ind.adx.toFixed(0)}) — choppy market`,
+                    reason: `ADX too low (${ind.adx.toFixed(0)}) — weak/choppy trend`,
                     confidence: 30, indicators: makeIndicators(),
                 };
             }
@@ -636,11 +652,13 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
             }
 
             // 4. StochRSI Cross-Up (buy timing)
+            // Recalibrated: was +20 for oversold bounce, capped at +12 to prevent
+            // confidence inflation from this single indicator.
             if (ind.stochRsi > 5 && ind.stochRsi < 30) {
-                buyConfidence += 20;
+                buyConfidence += 12;
                 buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (oversold bounce)`);
             } else if (ind.stochRsi >= 30 && ind.stochRsi < 50) {
-                buyConfidence += 8;
+                buyConfidence += 5;
                 buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)}`);
             } else if (ind.stochRsi <= 5) {
                 // Actively dumping, wait for bounce
@@ -670,10 +688,10 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
 
             // 7. RVOL (relative volume from Turso)
             if (rvol > 1.5) {
-                buyConfidence += 10;
+                buyConfidence += 6;
                 buySignals.push(`RVOL ${rvol.toFixed(1)}x`);
             } else if (rvol > 1.2) {
-                buyConfidence += 4;
+                buyConfidence += 3;
             }
 
             // 8. VWAP
@@ -684,16 +702,17 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
 
             // 9. OBV Accumulation
             if (ind.obvTrend > 0) {
-                buyConfidence += 8;
+                buyConfidence += 5;
                 buySignals.push('OBV accumulation');
             }
 
             // 10. Bollinger Band position (buy near lower in uptrend)
+            // Recalibrated: was +12, now +8 to prevent confidence inflation.
             const bbRange = ind.bollingerBands.upper - ind.bollingerBands.lower;
             if (bbRange > 0) {
                 const bbPosition = (current.close - ind.bollingerBands.lower) / bbRange;
                 if (bbPosition < 0.3 && isUptrend) {
-                    buyConfidence += 12;
+                    buyConfidence += 8;
                     buySignals.push('Near BB lower band');
                 }
             }

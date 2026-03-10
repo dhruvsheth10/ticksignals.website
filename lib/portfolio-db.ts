@@ -898,3 +898,24 @@ export async function getDayOpenPrices(): Promise<Map<string, number>> {
     }
     return dayOpens;
 }
+
+/**
+ * Get tickers that were sold via stop-loss, trailing stop, or hard stop
+ * within the last N days. Used by the trading engine to enforce a
+ * re-entry cooldown and avoid whipsaw (stop → immediate re-buy).
+ */
+export async function getRecentStopLossSells(cooldownDays: number = 3): Promise<Set<string>> {
+    const db = getTurso();
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - cooldownDays);
+    const cutoffStr = cutoff.toISOString();
+
+    const r = await db.execute({
+        sql: `SELECT DISTINCT ticker FROM portfolio_transactions
+              WHERE type = 'SELL' AND date >= ?
+              AND (notes LIKE '%Trailing Stop%' OR notes LIKE '%Hard Stop%' OR notes LIKE '%Gap-Down Exit%' OR notes LIKE '%Trend Exit%')`,
+        args: [cutoffStr],
+    });
+
+    return new Set((r.rows as any[]).map(row => row.ticker));
+}
