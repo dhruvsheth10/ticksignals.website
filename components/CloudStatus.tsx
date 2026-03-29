@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { fetchJsonWithTimeout } from '../lib/fetchWithTimeout';
 
 type CloudStatus = {
     ok: boolean;
@@ -14,17 +15,19 @@ export default function CloudStatus() {
     useEffect(() => {
         const fetchStatus = async () => {
             try {
-                const res = await fetch('/api/status/cloud');
-                const data = await res.json();
+                const { data } = await fetchJsonWithTimeout<CloudStatus>(
+                    '/api/status/cloud',
+                    { timeoutMs: 15_000, retries: 1 }
+                );
                 setStatus(data);
                 setError(null);
-            } catch (err: any) {
-                setError(err.message || 'Failed to load cloud status');
+            } catch (err: unknown) {
+                setError(err instanceof Error ? err.message : 'Failed to load cloud status');
             }
         };
 
         fetchStatus();
-        const interval = setInterval(fetchStatus, 60_000); // refresh every minute
+        const interval = setInterval(fetchStatus, 60_000);
         return () => clearInterval(interval);
     }, []);
 

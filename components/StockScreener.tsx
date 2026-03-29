@@ -143,26 +143,30 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 error?: string;
                 stocks?: StockData[];
                 lastUpdated?: string | null;
-            }>('/api/screener', { cache: 'no-store', timeoutMs: 45_000 });
+            }>('/api/screener', { timeoutMs: 45_000 });
             if (!response.ok) {
                 setFetchError(data.error || `Failed to load screener (${response.status})`);
                 setStocks([]);
                 setLastUpdated(null);
                 return;
             }
-            setStocks(data.stocks || []);
+            const s = Array.isArray(data.stocks) ? data.stocks : [];
+            setStocks(s);
             setLastUpdated(data.lastUpdated ?? null);
         } catch (error: unknown) {
-            console.error('Failed to fetch screener data:', error);
-            const aborted =
+            console.error('[TickSignals] screener fetch failed:', error);
+            const isAbort =
                 typeof error === 'object' &&
                 error !== null &&
                 'name' in error &&
                 (error as { name: string }).name === 'AbortError';
+            const isTypeError = error instanceof TypeError;
             setFetchError(
-                aborted
-                    ? 'Request timed out. A privacy or ad-blocking extension in this browser profile may be blocking or stalling API calls. Try disabling extensions for this site, another Arc space, or another browser.'
-                    : 'Network error while loading screener data'
+                isAbort
+                    ? 'Request timed out — a browser extension may be interfering. Try disabling extensions for this site.'
+                    : isTypeError
+                        ? 'A browser extension is breaking network requests. Disable extensions (especially crypto wallets) for this site and reload.'
+                        : `Network error: ${error instanceof Error ? error.message : 'unknown'}`
             );
             setStocks([]);
             setLastUpdated(null);
@@ -188,8 +192,8 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password }),
-                cache: 'no-store',
                 timeoutMs: 600_000,
+                retries: 0,
             });
 
             if (response.ok && data.success) {

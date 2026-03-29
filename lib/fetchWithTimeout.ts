@@ -1,70 +1,63 @@
 const DEFAULT_MS = 45_000;
 
-function abortError(): Error {
-    const e = new Error('The operation was aborted');
-    e.name = 'AbortError';
-    return e;
-}
-
 /**
- * fetch() that aborts the TCP request after `timeoutMs`.
- * Note: in browsers the fetch promise may settle when headers arrive; a stalled
- * response body can still hang `response.json()`. Prefer `fetchJsonWithTimeout`
- * for API calls that parse JSON.
+ * Resilient JSON fetch:
+ *   1. Adds a cache-busting `_t` query param to defeat stale caches / service workers.
+ *   2. Uses `response.text()` + `JSON.parse()` instead of `response.json()`
+ *      so browser extensions that patch `Response.prototype.json` (e.g. MetaMask
+ *      SES lockdown) can't silently break parsing.
+ *   3. Wraps everything in a single deadline (connect + body + parse).
+ *   4. Retries up to `retries` times on transient failures.
  */
-export function fetchWithTimeout(
+export async function fetchJsonWithTimeout<T = unknown>(
     input: RequestInfo | URL,
-    init: RequestInit & { timeoutMs?: number } = {}
-): Promise<Response> {
-    const { timeoutMs = DEFAULT_MS, signal: userSignal, ...rest } = init;
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), timeoutMs);
+    init: RequestInit & { timeoutMs?: number; retries?: number } = {}
+): Promise<{ response: Response; data: T }> {
+    const { timeoutMs = DEFAULT_MS, retries = 2, ...fetchInit } = init;
+    let lastError: unknown;
 
-    const onUserAbort = () => controller.abort();
-    if (userSignal) {
-        if (userSignal.aborted) controller.abort();
-        else userSignal.addEventListener('abort', onUserAbort, { once: true });
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const separator = url.includes('?') ? '&' : '?';
+            const bustUrl = `${url}${separator}_t=${Date.now()}`;
+
+            const response = await fetch(bustUrl, {
+                ...fetchInit,
+                signal: controller.signal,
+            });
+
+            const text = await response.text();
+            clearTimeout(timer);
+
+            let data: T;
+            try {
+                data = JSON.parse(text) as T;
+            } catch {
+                throw new Error(
+                    `Invalid JSON from ${url} (status ${response.status}, body length ${text.length})`
+                );
+            }
+
+            return { response, data };
+        } catch (err: unknown) {
+            clearTimeout(timer);
+            lastError = err;
+
+            const isAbort =
+                typeof err === 'object' &&
+                err !== null &&
+                'name' in err &&
+                (err as { name: string }).name === 'AbortError';
+
+            if (isAbort || attempt === retries) break;
+
+            await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
     }
 
-    return fetch(input, { ...rest, signal: controller.signal }).finally(() => {
-        clearTimeout(t);
-        userSignal?.removeEventListener('abort', onUserAbort);
-    });
-}
-
-/**
- * Fetches and parses JSON with a single deadline for the whole operation
- * (connection + download + parse). Avoids infinite "loading" when the body
- * never finishes or `json()` never completes.
- */
-export function fetchJsonWithTimeout<T = unknown>(
-    input: RequestInfo | URL,
-    init: RequestInit & { timeoutMs?: number } = {}
-): Promise<{ response: Response; data: T }> {
-    const { timeoutMs = DEFAULT_MS, ...rest } = init;
-
-    return new Promise((resolve, reject) => {
-        let settled = false;
-        const id = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            reject(abortError());
-        }, timeoutMs);
-
-        void (async () => {
-            try {
-                const response = await fetch(input, rest);
-                const data = (await response.json()) as T;
-                if (settled) return;
-                settled = true;
-                clearTimeout(id);
-                resolve({ response, data });
-            } catch (err) {
-                if (settled) return;
-                settled = true;
-                clearTimeout(id);
-                reject(err);
-            }
-        })();
-    });
+    throw lastError;
 }
