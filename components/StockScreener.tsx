@@ -116,6 +116,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     const [scanning, setScanning] = useState(false);
     const [scanResult, setScanResult] = useState<string>('');
     const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+    const [fetchError, setFetchError] = useState<string | null>(null);
     const [filters, setFilters] = useState<FilterConfig>(EMPTY_FILTERS);
     const [sortKey, setSortKey] = useState<SortKey>('ticker');
     const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -135,13 +136,23 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
 
     const fetchData = async () => {
         setLoading(true);
+        setFetchError(null);
         try {
             const response = await fetch('/api/screener');
             const data = await response.json();
+            if (!response.ok) {
+                setFetchError(data.error || `Failed to load screener (${response.status})`);
+                setStocks([]);
+                setLastUpdated(null);
+                return;
+            }
             setStocks(data.stocks || []);
             setLastUpdated(data.lastUpdated);
         } catch (error) {
             console.error('Failed to fetch screener data:', error);
+            setFetchError('Network error while loading screener data');
+            setStocks([]);
+            setLastUpdated(null);
         } finally {
             setLoading(false);
         }
@@ -545,6 +556,19 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                     <div className="text-center py-16">
                         <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-aquamarine-400"></div>
                         <p className="text-gray-400 mt-4">Loading data...</p>
+                    </div>
+                ) : fetchError ? (
+                    <div className="text-center py-16 px-4">
+                        <p className="text-amber-400/90 mb-2 font-medium">Could not load screener data</p>
+                        <p className="text-gray-400 text-sm max-w-md mx-auto">{fetchError}</p>
+                        <button
+                            type="button"
+                            onClick={() => fetchData()}
+                            className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-aquamarine-500/15 border border-aquamarine-500/40 text-aquamarine-300 text-sm hover:bg-aquamarine-500/25 transition-colors"
+                        >
+                            <RefreshCw size={16} />
+                            Retry
+                        </button>
                     </div>
                 ) : filteredStocks.length === 0 ? (
                     <div className="text-center py-16">

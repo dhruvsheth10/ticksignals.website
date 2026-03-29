@@ -3,27 +3,32 @@ import { Pool } from 'pg';
 // Shared Neon PostgreSQL pool
 let pool: Pool | null = null;
 
-// In-memory fallback for local development when Neon is unreachable
+// In-memory fallback for local development when Neon is unreachable (never used in production)
 let inMemoryCache: any[] = [];
 let useInMemory = false;
 
-export function getPool(): Pool {
-    if (!pool) {
-        pool = new Pool({
-            connectionString: process.env.NEON_DATABASE_URL,
-            max: 5,
-            idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 10000,
-        });
-    }
-    return pool;
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Initialize screener_cache table if it doesn't exist
-export async function initScreenerTable(): Promise<void> {
-    try {
-        const db = getPool();
-        await db.query(`
+/** In-memory DB only when developing locally or explicitly opted in via env. */
+export function allowInMemoryFallback(): boolean {
+    return process.env.NODE_ENV === 'development' || process.env.ALLOW_IN_MEMORY_DB === 'true';
+}
+
+/** Drop the pool so the next query opens a fresh connection (helps after Neon cold start). */
+export async function resetPool(): Promise<void> {
+    if (pool) {
+        try {
+            await pool.end();
+        } catch {
+            // ignore
+        }
+        pool = null;
+    }
+}
+
+const INIT_SQL = `
     CREATE TABLE IF NOT EXISTS screener_cache (
       ticker VARCHAR(10) PRIMARY KEY,
       price REAL,
@@ -49,12 +54,81 @@ export async function initScreenerTable(): Promise<void> {
       score REAL,
       added_at TIMESTAMPTZ DEFAULT NOW()
     );
-  `);
-        useInMemory = false;
-    } catch (error: any) {
-        console.warn('[DB] Neon connection failed, using in-memory storage for local dev:', error.message);
-        useInMemory = true;
+  `;
+
+async function withDbRetry<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    const maxAttempts = 4;
+    const delaysMs = [0, 600, 2000, 5000];
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
+            await sleep(delaysMs[attempt]);
+            await resetPool();
+        }
+        try {
+            return await fn();
+        } catch (e: any) {
+            lastError = e;
+            const msg = e?.message || String(e);
+            console.warn(`[DB] ${operation} attempt ${attempt + 1}/${maxAttempts} failed: ${msg}`);
+            if (attempt === maxAttempts - 1) break;
+        }
     }
+    throw lastError;
+}
+
+async function initScreenerTableOnce(): Promise<void> {
+    const db = getPool();
+    await db.query(INIT_SQL);
+}
+
+export function getPool(): Pool {
+    if (!pool) {
+        pool = new Pool({
+            connectionString: process.env.NEON_DATABASE_URL,
+            max: 5,
+            idleTimeoutMillis: 30000,
+            // Neon compute wake + TLS can exceed 10s on cold start
+            connectionTimeoutMillis: 20000,
+        });
+    }
+    return pool;
+}
+
+/**
+ * Ensure tables exist. In production, retries on transient Neon cold start / connection errors.
+ * In-memory mode only when NODE_ENV=development or ALLOW_IN_MEMORY_DB=true.
+ */
+export async function initScreenerTable(): Promise<void> {
+    if (allowInMemoryFallback()) {
+        try {
+            await withDbRetry('initScreenerTable', initScreenerTableOnce);
+            useInMemory = false;
+        } catch (error: any) {
+            console.warn('[DB] Neon connection failed, using in-memory storage for local dev:', error.message);
+            useInMemory = true;
+        }
+        return;
+    }
+    await withDbRetry('initScreenerTable', initScreenerTableOnce);
+    useInMemory = false;
+}
+
+/**
+ * Lightweight ping used by cron trade + external ping route to keep Neon from sleeping.
+ */
+export async function warmNeon(): Promise<void> {
+    await initScreenerTable();
+    if (useInMemory && allowInMemoryFallback()) {
+        return;
+    }
+    if (useInMemory) {
+        throw new Error('[DB] warmNeon: unexpected in-memory mode in production');
+    }
+    await withDbRetry('warmNeon', async () => {
+        const db = getPool();
+        await db.query('SELECT 1');
+    });
 }
 
 // Upsert a screener row
@@ -78,7 +152,9 @@ export async function upsertScreenerRow(data: {
     beta: number | null;
 }): Promise<void> {
     if (useInMemory) {
-        // In-memory: upsert
+        if (!allowInMemoryFallback()) {
+            throw new Error('[DB] upsertScreenerRow: in-memory mode is not allowed in production');
+        }
         const existingIndex = inMemoryCache.findIndex(row => row.ticker === data.ticker);
         if (existingIndex >= 0) {
             inMemoryCache[existingIndex] = { ...data, updated_at: new Date().toISOString() };
@@ -88,9 +164,10 @@ export async function upsertScreenerRow(data: {
         return;
     }
 
-    const db = getPool();
-    await db.query(
-        `INSERT INTO screener_cache (
+    await withDbRetry('upsertScreenerRow', async () => {
+        const db = getPool();
+        await db.query(
+            `INSERT INTO screener_cache (
       ticker, price, market_cap, pe_ratio, roe_pct, debt_to_equity,
       gross_margin_pct, dividend_yield_pct, roa_pct, total_revenue,
       revenue_per_employee, sector, industry, company_name,
@@ -114,43 +191,57 @@ export async function upsertScreenerRow(data: {
       fifty_two_week_low = EXCLUDED.fifty_two_week_low,
       beta = EXCLUDED.beta,
       updated_at = NOW()`,
-        [
-            data.ticker, data.price, data.market_cap, data.pe_ratio,
-            data.roe_pct, data.debt_to_equity, data.gross_margin_pct,
-            data.dividend_yield_pct, data.roa_pct, data.total_revenue,
-            data.revenue_per_employee, data.sector, data.industry,
-            data.company_name, data.fifty_two_week_high,
-            data.fifty_two_week_low, data.beta,
-        ]
-    );
+            [
+                data.ticker, data.price, data.market_cap, data.pe_ratio,
+                data.roe_pct, data.debt_to_equity, data.gross_margin_pct,
+                data.dividend_yield_pct, data.roa_pct, data.total_revenue,
+                data.revenue_per_employee, data.sector, data.industry,
+                data.company_name, data.fifty_two_week_high,
+                data.fifty_two_week_low, data.beta,
+            ]
+        );
+    });
 }
 
 // Fetch all cached screener data
 export async function getScreenerData(): Promise<any[]> {
     if (useInMemory) {
+        if (!allowInMemoryFallback()) {
+            throw new Error('[DB] getScreenerData: in-memory mode is not allowed in production');
+        }
         return inMemoryCache.sort((a, b) => (b.market_cap || 0) - (a.market_cap || 0));
     }
 
-    const db = getPool();
-    const result = await db.query(
-        `SELECT * FROM screener_cache ORDER BY market_cap DESC NULLS LAST`
-    );
-    return result.rows;
+    return withDbRetry('getScreenerData', async () => {
+        const db = getPool();
+        const result = await db.query(
+            `SELECT * FROM screener_cache ORDER BY market_cap DESC NULLS LAST`
+        );
+        return result.rows;
+    });
 }
 
 // Fetch cached data for a specific ticker
 export async function getScreenerTicker(ticker: string): Promise<any> {
     if (useInMemory) {
+        if (!allowInMemoryFallback()) {
+            throw new Error('[DB] getScreenerTicker: in-memory mode is not allowed in production');
+        }
         return inMemoryCache.find(t => t.ticker === ticker) || null;
     }
-    const db = getPool();
-    const result = await db.query(`SELECT * FROM screener_cache WHERE ticker = $1`, [ticker]);
-    return result.rows[0] || null;
+    return withDbRetry('getScreenerTicker', async () => {
+        const db = getPool();
+        const result = await db.query(`SELECT * FROM screener_cache WHERE ticker = $1`, [ticker]);
+        return result.rows[0] || null;
+    });
 }
 
 // Get scan metadata
 export async function getScanMetadata(): Promise<{ count: number; lastUpdated: string | null }> {
     if (useInMemory) {
+        if (!allowInMemoryFallback()) {
+            throw new Error('[DB] getScanMetadata: in-memory mode is not allowed in production');
+        }
         const lastUpdated = inMemoryCache.length > 0
             ? inMemoryCache.reduce((latest, row) =>
                 new Date(row.updated_at) > new Date(latest) ? row.updated_at : latest,
@@ -163,19 +254,21 @@ export async function getScanMetadata(): Promise<{ count: number; lastUpdated: s
         };
     }
 
-    const db = getPool();
-    const result = await db.query(
-        `SELECT COUNT(*) as count, MAX(updated_at) as last_updated FROM screener_cache`
-    );
-    return {
-        count: parseInt(result.rows[0]?.count || '0'),
-        lastUpdated: result.rows[0]?.last_updated || null,
-    };
+    return withDbRetry('getScanMetadata', async () => {
+        const db = getPool();
+        const result = await db.query(
+            `SELECT COUNT(*) as count, MAX(updated_at) as last_updated FROM screener_cache`
+        );
+        return {
+            count: parseInt(result.rows[0]?.count || '0'),
+            lastUpdated: result.rows[0]?.last_updated || null,
+        };
+    });
 }
 
 // Update monitored prospects (replace old list)
 export async function updateMonitoredProspects(prospects: { ticker: string; score: number }[]): Promise<void> {
-    if (useInMemory) return; // No-op for in-memory
+    if (useInMemory) return;
 
     const db = getPool();
     const client = await db.connect();
@@ -201,10 +294,12 @@ export async function updateMonitoredProspects(prospects: { ticker: string; scor
 export async function getMonitoredProspects(): Promise<{ ticker: string; score: number }[]> {
     if (useInMemory) return [];
 
-    const db = getPool();
     try {
-        const res = await db.query(`SELECT ticker, score FROM monitored_prospects ORDER BY score DESC`);
-        return res.rows;
+        return await withDbRetry('getMonitoredProspects', async () => {
+            const db = getPool();
+            const res = await db.query(`SELECT ticker, score FROM monitored_prospects ORDER BY score DESC`);
+            return res.rows;
+        });
     } catch (e) {
         console.error('[DB] Failed to get prospects:', e);
         return [];

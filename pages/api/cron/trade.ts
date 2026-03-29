@@ -8,6 +8,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { runTradingCycle, isMarketOpen } from '../../../lib/trading-engine';
 import { initPortfolioTables } from '../../../lib/portfolio-db';
+import { warmNeon } from '../../../lib/db';
 
 export default async function handler(
     req: NextApiRequest,
@@ -29,6 +30,7 @@ export default async function handler(
 
     try {
         await initPortfolioTables();
+        await warmNeon().catch((e) => console.warn('[Cron] Neon warm-up failed:', e));
 
         if (!isMarketOpen() && type !== 'OPEN') {
             console.log('Market Closed. Skipping trade cycle.');

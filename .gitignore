@@ -2,7 +2,8 @@
 /node_modules
 /.pnp
 .pnp.js
-
+/cursor
+/.cursor
 # testing
 /coverage
 

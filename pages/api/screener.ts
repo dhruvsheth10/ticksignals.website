@@ -171,7 +171,12 @@ export default async function handler(
                 });
             } catch (dbErr: any) {
                 console.error('[Screener] DB read failed:', dbErr.message);
-                return res.status(200).json({ stocks: [], totalStocks: 0, lastUpdated: null });
+                return res.status(503).json({
+                    error: 'Database temporarily unavailable. Retry in a moment.',
+                    stocks: [],
+                    totalStocks: 0,
+                    lastUpdated: null,
+                });
             }
         }
 
