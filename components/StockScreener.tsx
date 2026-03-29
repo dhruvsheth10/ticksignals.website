@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import { fetchWithTimeout } from '../lib/fetchWithTimeout';
 import {
     SlidersHorizontal, TrendingUp, ArrowUpDown, ArrowUp, ArrowDown,
     RefreshCw, Download, ChevronDown, ChevronUp, Search, Zap,
@@ -138,7 +139,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         setLoading(true);
         setFetchError(null);
         try {
-            const response = await fetch('/api/screener');
+            const response = await fetchWithTimeout('/api/screener', { timeoutMs: 45_000 });
             const data = await response.json();
             if (!response.ok) {
                 setFetchError(data.error || `Failed to load screener (${response.status})`);
@@ -148,9 +149,18 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
             }
             setStocks(data.stocks || []);
             setLastUpdated(data.lastUpdated);
-        } catch (error) {
+        } catch (error: unknown) {
             console.error('Failed to fetch screener data:', error);
-            setFetchError('Network error while loading screener data');
+            const aborted =
+                typeof error === 'object' &&
+                error !== null &&
+                'name' in error &&
+                (error as { name: string }).name === 'AbortError';
+            setFetchError(
+                aborted
+                    ? 'Request timed out. A privacy or ad-blocking extension in this browser profile may be blocking or stalling API calls. Try disabling extensions for this site, another Arc space, or another browser.'
+                    : 'Network error while loading screener data'
+            );
             setStocks([]);
             setLastUpdated(null);
         } finally {
@@ -165,10 +175,11 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         setScanning(true);
         setScanResult('Initializing...');
         try {
-            const response = await fetch('/api/screener', {
+            const response = await fetchWithTimeout('/api/screener', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password }),
+                timeoutMs: 600_000,
             });
             const data = await response.json();
 
