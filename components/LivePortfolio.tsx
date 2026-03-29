@@ -4,7 +4,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart,
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText, TrendingUp, TrendingDown } from 'lucide-react';
 import BlurText from './BlurText';
 import AnimatedNumber from './AnimatedNumber';
-import { fetchWithTimeout } from '../lib/fetchWithTimeout';
+import { fetchJsonWithTimeout } from '../lib/fetchWithTimeout';
 
 interface PortfolioData {
     status: {
@@ -158,8 +158,9 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     const fetchPortfolio = useCallback(async (silent = false) => {
         try {
             if (!silent) setLoading(true);
-            const res = await fetchWithTimeout('/api/portfolio', { timeoutMs: 45_000 });
-            const json = await res.json();
+            const { data: json } = await fetchJsonWithTimeout<PortfolioData>('/api/portfolio', {
+                timeoutMs: 45_000,
+            });
             setData(json);
         } catch (err) {
             console.error(err);

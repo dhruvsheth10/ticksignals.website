@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { fetchWithTimeout } from '../lib/fetchWithTimeout';
+import { fetchJsonWithTimeout } from '../lib/fetchWithTimeout';
 import {
     SlidersHorizontal, TrendingUp, ArrowUpDown, ArrowUp, ArrowDown,
     RefreshCw, Download, ChevronDown, ChevronUp, Search, Zap,
@@ -139,8 +139,11 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         setLoading(true);
         setFetchError(null);
         try {
-            const response = await fetchWithTimeout('/api/screener', { timeoutMs: 45_000 });
-            const data = await response.json();
+            const { response, data } = await fetchJsonWithTimeout<{
+                error?: string;
+                stocks?: StockData[];
+                lastUpdated?: string | null;
+            }>('/api/screener', { cache: 'no-store', timeoutMs: 45_000 });
             if (!response.ok) {
                 setFetchError(data.error || `Failed to load screener (${response.status})`);
                 setStocks([]);
@@ -148,7 +151,7 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 return;
             }
             setStocks(data.stocks || []);
-            setLastUpdated(data.lastUpdated);
+            setLastUpdated(data.lastUpdated ?? null);
         } catch (error: unknown) {
             console.error('Failed to fetch screener data:', error);
             const aborted =
@@ -175,13 +178,19 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
         setScanning(true);
         setScanResult('Initializing...');
         try {
-            const response = await fetchWithTimeout('/api/screener', {
+            const { response, data } = await fetchJsonWithTimeout<{
+                success?: boolean;
+                processed?: number;
+                durationSeconds?: string;
+                details?: string;
+                error?: string;
+            }>('/api/screener', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password }),
+                cache: 'no-store',
                 timeoutMs: 600_000,
             });
-            const data = await response.json();
 
             if (response.ok && data.success) {
                 setScanResult(`✓ ${data.processed} stocks scanned in ${data.durationSeconds}s`);
@@ -191,8 +200,17 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                 setScanResult(`Error: ${errorMsg}`);
                 console.error('Scan failed:', data);
             }
-        } catch (error: any) {
-            setScanResult(`Error: ${error.message}`);
+        } catch (error: unknown) {
+            const aborted =
+                typeof error === 'object' &&
+                error !== null &&
+                'name' in error &&
+                (error as { name: string }).name === 'AbortError';
+            setScanResult(
+                aborted
+                    ? 'Error: Request timed out (scan can take a while — try again or use another browser profile if this persists).'
+                    : `Error: ${error instanceof Error ? error.message : String(error)}`
+            );
             console.error('Scan error:', error);
         } finally {
             setScanning(false);
