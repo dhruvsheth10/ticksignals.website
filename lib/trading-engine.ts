@@ -143,8 +143,14 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // Don't trail-stop on trade day — give position at least 1 full session
-        if (daysHeld >= 0.5 && price < trailStopPrice) {
+        // Trailing stop activation: require HWM to have reached a meaningful level
+        // above entry before the trail can trigger. This prevents noise kills on
+        // positions that never confirmed the thesis. 6 of 10 trailing stop losses
+        // in the last 10 days occurred on positions where HWM was < 1% above entry.
+        const trailActivationMin = holding.avg_cost + Math.min(holding.avg_cost * 0.015, atr);
+        const trailIsActive = hwm >= trailActivationMin;
+
+        if (daysHeld >= 0.5 && trailIsActive && price < trailStopPrice) {
             const sellShares = holding.shares;
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
                 `Trailing Stop: Price $${price.toFixed(2)} < Trail $${trailStopPrice.toFixed(2)} (HWM $${hwm.toFixed(2)}, ATR $${atr.toFixed(2)})`);
@@ -305,8 +311,10 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     // Dynamic cash floor: keep 20% of portfolio liquid (min $1000)
     const cashFloor = Math.max(1000, freshStatus.total_value * 0.20);
-    const MAX_POSITIONS = 25; // Soft ceiling, rarely reached due to dynamic confidence
-    // Limit first cycle to 4 buys, subsequent same-day cycles to 2
+    // Hard ceiling at 15. Research: 12-20 stocks cuts ~80% of idiosyncratic risk.
+    // With ~$100K and confidence-weighted sizing, 8-12 is the practical sweet spot;
+    // 15 is a hard cap for exceptional signals only.
+    const MAX_POSITIONS = 15;
     const isFirstCycleToday = updatedHoldings.length <= 1;
     const MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
 
@@ -368,14 +376,16 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // Dynamic confidence gate:
-        // 5-10 positions is ideal, requiring the base 65%
-        // As positions grow, demand progressively higher confidence
+        // Dynamic confidence gate — tuned for 8-12 position sweet spot.
+        // Below 8: base 65% lets the portfolio build up quickly.
+        // 8-9: 72% is achievable but filters out marginal setups.
+        // 10-11: 80% demands strong signals to justify incremental positions.
+        // 12+: 88% makes additional positions exceptional-only.
         let requiredConfidence = 65;
         const currentCount = updatedHoldings.length + buyCount;
-        if (currentCount >= 20) requiredConfidence = 90;
-        else if (currentCount >= 15) requiredConfidence = 85;
-        else if (currentCount >= 10) requiredConfidence = 75;
+        if (currentCount >= 12) requiredConfidence = 88;
+        else if (currentCount >= 10) requiredConfidence = 80;
+        else if (currentCount >= 8) requiredConfidence = 72;
 
         if (candidate.confidence < requiredConfidence) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
@@ -448,12 +458,15 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
 /**
  * Calculate position size dynamically based on confidence factor.
- * The higher the confidence, the larger the capital allocation.
  *
- * Higher conviction scores are exponentially rewarded with more capital.
- * - ~65% confidence -> ~5% of portfolio
- * - ~80% confidence -> ~10% of portfolio
- * - ~95% confidence -> ~17% of portfolio
+ * Confidence-weighted sizing rewards high-conviction setups:
+ *   ~65% confidence -> ~5.5% of portfolio  (threshold entry)
+ *   ~75% confidence -> ~8.4%               (good setup)
+ *   ~85% confidence -> ~12.3%              (strong setup, near cap)
+ *   ~90% confidence -> ~14.6%              (capped to 12%)
+ *
+ * Hard cap: 12% of total portfolio per position to prevent concentration risk.
+ * NEM at 13.5% was the largest single-trade loss in the last 10 days.
  */
 function calculatePositionSize(
     confidence: number,
@@ -462,25 +475,20 @@ function calculatePositionSize(
     cashAvailable: number,
     currentPositions: number
 ): number {
-    // Use an exponential curve to scale capital allocation based on confidence.
-    // This rewards high conviction setups with significantly more capital.
     const confidenceRatio = Math.max(0, Math.min(100, confidence)) / 100;
-
-    // For 65% -> 0.65^3 * 0.20 = 0.054 (5.4%)
-    // For 80% -> 0.80^3 * 0.20 = 0.102 (10.2%)
-    // For 95% -> 0.95^3 * 0.20 = 0.171 (17.1%)
     const basePct = Math.pow(confidenceRatio, 3) * 0.20;
 
     let size = totalValue * basePct;
 
-    // Never use more than 50% of the remaining liquid cash on a single position 
-    // to ensure capital doesn't entirely run out on one trade.
-    size = Math.min(size, cashAvailable * 0.50);
+    // Hard cap: no single position larger than 12% of total portfolio
+    size = Math.min(size, totalValue * 0.12);
 
-    // ATR risk adjustment: if stock is very volatile, reduce position
-    // ATR as % of stock price > 3% → cut position 30%, > 5% → cut 50%
+    // Cash guard: never use more than 40% of remaining liquid cash
+    // (was 50%, but caused outsized bets when cash was high after sells)
+    size = Math.min(size, cashAvailable * 0.40);
+
+    // ATR risk adjustment: volatile stocks get smaller positions
     if (atr > 0) {
-        // Estimate per-share price from target allocation (approximate)
         const estimatedPrice = size > 0 ? cashAvailable / 10 : 100;
         const atrPctOfPrice = (atr / estimatedPrice) * 100;
         if (atrPctOfPrice > 5) {
@@ -613,20 +621,16 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
         const priceAboveTrend = current.close > ind.ema50;
 
         if (isUptrend && priceAboveTrend) {
-            // 2. ADX Trend Strength (must confirm a real trend)
-            // Raised minimum from 15 to 20: ADX 15-19 produced too many
-            // churn trades (buy → trend-death exit → small loss).
-            if (ind.adx > 25) {
+            // 2. ADX Trend Strength — require confirmed trend (>= 25)
+            // ADX 20-24 ("trend developing") entries had ~10% win rate vs ~50%+ for ADX >= 25.
+            // Eliminating the 20-24 tier removes the largest single source of losing trades.
+            if (ind.adx >= 25) {
                 buyConfidence += 15;
                 buySignals.push(`ADX ${ind.adx.toFixed(0)} (trend confirmed)`);
-            } else if (ind.adx >= 20) {
-                buyConfidence += 8;
-                buySignals.push(`ADX ${ind.adx.toFixed(0)} (trend developing)`);
             } else {
-                // ADX < 20 = choppy/weak, skip buying
                 return {
                     ticker, action: 'HOLD',
-                    reason: `ADX too low (${ind.adx.toFixed(0)}) — weak/choppy trend`,
+                    reason: `ADX too low (${ind.adx.toFixed(0)}) — trend not confirmed`,
                     confidence: 30, indicators: makeIndicators(),
                 };
             }
@@ -661,9 +665,13 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
                 buyConfidence += 5;
                 buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)}`);
             } else if (ind.stochRsi <= 5) {
-                // Actively dumping, wait for bounce
-                buyConfidence -= 15;
-                buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (falling knife, wait for bounce)`);
+                // Hard gate: StochRSI <= 5 entries lost $938 in 10 days.
+                // Wait for bounce above 10 before considering entry.
+                return {
+                    ticker, action: 'HOLD',
+                    reason: `StochRSI ${ind.stochRsi.toFixed(0)} — falling knife, waiting for bounce`,
+                    confidence: 20, indicators: makeIndicators(),
+                };
             }
 
             // 5. MACD Bullish
