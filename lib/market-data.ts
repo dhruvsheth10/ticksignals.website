@@ -188,92 +188,99 @@ export class MarketDataService {
         } | null;
         error?: string;
     }> {
+        // ── 1. Yahoo Finance (primary — no rate-limit sleep, no API key needed) ──
+        for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
+            try {
+                const data = await httpsGet(
+                    `https://${host}/v8/finance/chart/${ticker}?interval=1d&range=2mo`
+                );
+                const result = data?.chart?.result?.[0];
+                if (result?.timestamp && result?.indicators?.quote?.[0]) {
+                    const quote = result.indicators.quote[0];
+                    const len: number = result.timestamp.length;
+                    if (len >= 2) {
+                        const i = len - 1;
+                        const todayClose: number = quote.close[i];
+                        if (todayClose && todayClose > 0) {
+                            const today = {
+                                o: (quote.open[i] ?? todayClose) as number,
+                                h: (quote.high[i] ?? todayClose) as number,
+                                l: (quote.low[i] ?? todayClose) as number,
+                                c: todayClose,
+                                v: (quote.volume[i] ?? 0) as number,
+                            };
+                            const historicalVols = (quote.volume as number[])
+                                .slice(0, i)
+                                .filter((v: number) => v > 0);
+                            const avgVol = historicalVols.length > 0
+                                ? historicalVols.reduce((a: number, b: number) => a + b, 0) / historicalVols.length
+                                : today.v;
+                            const rvol = avgVol > 0 ? today.v / avgVol : 1;
+                            const vwap = (today.h + today.l + today.c) / 3;
+                            return { data: { ...today, vwap, rvol } };
+                        }
+                    }
+                }
+            } catch (e: any) {
+                console.warn(`[MarketData] Yahoo intraday (${host}) failed for ${ticker}:`, e.message);
+            }
+        }
+
+        // ── 2. Finnhub fallback (rate-limited: 1 req/sec) ──
         try {
-            // We use Finnhub 'D' (daily) resolution to get both history and "today so far".
-            // Finnhub's last candle in 'D' results is the current incomplete day candle.
-            // Requesting 35 days to ensure we have 30 complete days.
             const to = Math.floor(Date.now() / 1000);
             const from = to - (35 * 86400);
-
-            // Debug: check key
-            const maskKey = KEYS.FINNHUB.slice(0, 2) + '...' + KEYS.FINNHUB.slice(-2);
-            console.log(`[MarketData] Finnhub Key: ${maskKey}`);
-
             const data = await this.fetchFinnhub(ticker, 'D', from, to);
 
-            if (data.s !== 'ok') {
-                // 403 usually means premium endpoint or restricted market. Fallback to Alpha Vantage?
-                console.warn(`[MarketData] Finnhub error for ${ticker}: ${data.s} (Code: ${data.s === 'no_data' ? 404 : 403})`);
+            if (data.s !== 'ok' || !data.t || data.t.length < 2) {
                 throw new Error(`Finnhub error: ${data.s}`);
-            }
-            if (!data.t || data.t.length < 2) {
-                throw new Error(`Finnhub: Insufficient data (t=${data.t?.length})`);
             }
 
             const len = data.t.length;
             const today = {
-                o: data.o[len - 1],
-                h: data.h[len - 1],
-                l: data.l[len - 1],
-                c: data.c[len - 1],
-                v: data.v[len - 1]
+                o: data.o[len - 1] as number,
+                h: data.h[len - 1] as number,
+                l: data.l[len - 1] as number,
+                c: data.c[len - 1] as number,
+                v: data.v[len - 1] as number,
             };
-
-            // Calculate Avg Volume from previous 30 days
-            const historicalVols = data.v.slice(0, len - 1).filter((v: number) => v > 0);
+            const historicalVols = (data.v as number[]).slice(0, len - 1).filter((v: number) => v > 0);
             const avgVol = historicalVols.length > 0
                 ? historicalVols.reduce((a: number, b: number) => a + b, 0) / historicalVols.length
                 : today.v;
-
             const rvol = avgVol > 0 ? today.v / avgVol : 1;
-
-            // Approximate VWAP
             const vwap = (today.h + today.l + today.c) / 3;
+            return { data: { ...today, vwap, rvol } };
 
-            return {
-                data: { o: today.o, h: today.h, l: today.l, c: today.c, v: today.v, vwap, rvol }
+        } catch (finnhubErr: any) {
+            console.warn(`[MarketData] Finnhub intraday failed for ${ticker}:`, finnhubErr.message);
+        }
+
+        // ── 3. Alpha Vantage last resort ──
+        try {
+            if (STATE.avUsed >= LIMITS.AV_DAILY) throw new Error('Alpha Vantage daily limit reached');
+            const avData = await this.fetchAlphaVantage(ticker);
+            const ts = avData['Time Series (Daily)'];
+            if (!ts) throw new Error('No AV data');
+            const dates = Object.keys(ts).sort();
+            if (dates.length < 2) throw new Error('Insufficient AV history');
+            const todayDate = dates[dates.length - 1];
+            const todayCandle = ts[todayDate];
+            const today = {
+                o: parseFloat(todayCandle['1. open']),
+                h: parseFloat(todayCandle['2. high']),
+                l: parseFloat(todayCandle['3. low']),
+                c: parseFloat(todayCandle['4. close']),
+                v: parseFloat(todayCandle['5. volume']),
             };
-
-        } catch (e: any) {
-            console.warn(`[MarketData] Finnhub Intraday failed for ${ticker}: ${e.message}. Trying Backup (Alpha Vantage)...`);
-
-            // Backup: Alpha Vantage (TIME_SERIES_DAILY) - Limited to 25/day
-            try {
-                if (STATE.avUsed >= LIMITS.AV_DAILY) throw new Error('Alpha Vantage daily limit reached');
-
-                const avData = await this.fetchAlphaVantage(ticker); // "Time Series (Daily)"
-                const ts = avData['Time Series (Daily)'];
-                if (!ts) throw new Error('No AV data');
-
-                const dates = Object.keys(ts).sort(); // Oldest first
-                if (dates.length < 2) throw new Error('Insufficient AV history');
-
-                const todayDate = dates[dates.length - 1];
-                const todayCandle = ts[todayDate];
-                const today = {
-                    o: parseFloat(todayCandle['1. open']),
-                    h: parseFloat(todayCandle['2. high']),
-                    l: parseFloat(todayCandle['3. low']),
-                    c: parseFloat(todayCandle['4. close']),
-                    v: parseFloat(todayCandle['5. volume'])
-                };
-
-                // Calculate 30d avg volume
-                // dates are sorted, so take slice(-31, -1)
-                const histDates = dates.slice(Math.max(0, dates.length - 31), dates.length - 1);
-                const vols = histDates.map(d => parseFloat(ts[d]['5. volume'])).filter(v => v > 0);
-                const avgVol = vols.length > 0 ? vols.reduce((a, b) => a + b, 0) / vols.length : today.v;
-                const rvol = avgVol > 0 ? today.v / avgVol : 1;
-                const vwap = (today.h + today.l + today.c) / 3;
-
-                return {
-                    data: { o: today.o, h: today.h, l: today.l, c: today.c, v: today.v, vwap, rvol }
-                };
-
-            } catch (avErr: any) {
-                console.warn(`[MarketData] AV Backup failed for ${ticker}: ${avErr.message}`);
-                return { data: null, error: `Finnhub: ${e.message} | AV: ${avErr.message}` };
-            }
+            const histDates = dates.slice(Math.max(0, dates.length - 31), dates.length - 1);
+            const vols = histDates.map(d => parseFloat(ts[d]['5. volume'])).filter(v => v > 0);
+            const avgVol = vols.length > 0 ? vols.reduce((a, b) => a + b, 0) / vols.length : today.v;
+            const rvol = avgVol > 0 ? today.v / avgVol : 1;
+            const vwap = (today.h + today.l + today.c) / 3;
+            return { data: { ...today, vwap, rvol } };
+        } catch (avErr: any) {
+            return { data: null, error: `All sources failed for ${ticker}: ${avErr.message}` };
         }
     }
 

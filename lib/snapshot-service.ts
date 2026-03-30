@@ -87,39 +87,41 @@ export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Pro
         console.warn('[Snapshot] Screener query failed, using holdings only');
     }
 
-    const allTickers = [...new Set([...tickersFromHoldings, ...tickersFromScreener])];
+    // Yahoo Finance has no strict rate limit so we can fetch in parallel.
+    // Use batches of 10 with a small gap to avoid hammering any single host.
+    const allTickers = [...new Set([...tickersFromHoldings, ...tickersFromScreener.slice(0, 30)])];
     const now = new Date().toISOString();
     let ok = 0, fail = 0;
     const errors: any[] = [];
+    const BATCH = 10;
 
-    for (const ticker of allTickers) {
-        const result = await fetchIntradayAndRVOL(ticker);
-
-        if (!result || !result.data) {
-            fail++;
-            errors.push({ ticker, error: result?.error || 'Unknown error' });
-            continue;
-        }
-
-        const data = result.data;
-
-        try {
-            await saveDailySnapshot({
-                ticker,
-                snapshot_at: now,
-                interval_type: intervalType,
-                open: data.o,
-                high: data.h,
-                low: data.l,
-                close: data.c,
-                volume: data.v,
-                vwap: data.vwap,
-                rvol: data.rvol,
-            });
-            ok++;
-        } catch (e: any) {
-            fail++;
-            errors.push({ ticker, error: `DB Save Error: ${e.message}` });
+    for (let i = 0; i < allTickers.length; i += BATCH) {
+        const batch = allTickers.slice(i, i + BATCH);
+        const results = await Promise.allSettled(
+            batch.map(async (ticker) => {
+                const result = await fetchIntradayAndRVOL(ticker);
+                if (!result?.data) throw new Error(result?.error || 'No data');
+                await saveDailySnapshot({
+                    ticker,
+                    snapshot_at: now,
+                    interval_type: intervalType,
+                    open: result.data.o,
+                    high: result.data.h,
+                    low: result.data.l,
+                    close: result.data.c,
+                    volume: result.data.v,
+                    vwap: result.data.vwap,
+                    rvol: result.data.rvol,
+                });
+            })
+        );
+        for (let j = 0; j < results.length; j++) {
+            if (results[j].status === 'fulfilled') {
+                ok++;
+            } else {
+                fail++;
+                errors.push({ ticker: batch[j], error: (results[j] as PromiseRejectedResult).reason?.message });
+            }
         }
     }
 
@@ -137,30 +139,26 @@ export async function runHoldings10MinPing(): Promise<{ ok: number; fail: number
     if (holdings.length === 0) return { ok: 0, fail: 0 };
 
     const barTime = roundTo10Min(new Date().toISOString());
-    let ok = 0, fail = 0;
 
-    for (const h of holdings) {
-        const result = await fetchIntradayAndRVOL(h.ticker);
-
-        if (!result || !result.data) { fail++; continue; }
-        const data = result.data;
-
-        try {
+    // Fetch all holdings in parallel — Yahoo Finance handles concurrent requests fine
+    const results = await Promise.allSettled(
+        holdings.map(async (h) => {
+            const result = await fetchIntradayAndRVOL(h.ticker);
+            if (!result?.data) throw new Error(result?.error || 'No data');
             await saveIntradayBar({
                 ticker: h.ticker,
                 bar_time: barTime,
-                open: data.o,
-                high: data.h,
-                low: data.l,
-                close: data.c,
-                volume: data.v,
-                vwap: data.vwap,
+                open: result.data.o,
+                high: result.data.h,
+                low: result.data.l,
+                close: result.data.c,
+                volume: result.data.v,
+                vwap: result.data.vwap,
             });
-            ok++;
-        } catch (e) {
-            fail++;
-        }
-    }
+        })
+    );
 
+    const ok = results.filter(r => r.status === 'fulfilled').length;
+    const fail = results.filter(r => r.status === 'rejected').length;
     return { ok, fail };
 }

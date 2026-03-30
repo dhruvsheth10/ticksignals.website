@@ -41,39 +41,47 @@ export default async function handler(
         }
 
         const logs: string[] = [`Evaluated ${prospects.length} monitored prospects:`];
-        const signals = [];
+        const signals: string[] = [];
 
-        for (const p of prospects) {
-            try {
-                // analyzeTicker fetches daily candles + indicators + sentiment
-                const signal = await analyzeTicker(p.ticker);
+        // Analyse tickers in parallel batches of 5.
+        // getDailyCandles uses Yahoo Finance first (no sleep) so batching is safe.
+        const BATCH = 5;
+        for (let i = 0; i < prospects.length; i += BATCH) {
+            const batch = prospects.slice(i, i + BATCH);
+            const batchResults = await Promise.allSettled(
+                batch.map(async (p) => {
+                    const signal = await analyzeTicker(p.ticker);
+                    await saveAnalysisResult({
+                        ticker: p.ticker,
+                        action: signal.action,
+                        confidence: signal.confidence,
+                        reason: signal.reason,
+                        sentimentScore: signal.sentimentBoost ? signal.sentimentBoost / 10 : undefined,
+                        sentimentConfidence: signal.sentimentBoost ? Math.abs(signal.sentimentBoost) / 10 : undefined,
+                        rsi: signal.indicators?.rsi,
+                        macdHistogram: signal.indicators?.macdHistogram,
+                        volumeRatio: signal.indicators?.volumeRatio,
+                        priceChangePct: signal.indicators?.priceChangePct,
+                        sma50: signal.indicators?.sma50,
+                        sma200: signal.indicators?.sma200,
+                    });
+                    return { p, signal };
+                })
+            );
 
-                // Save result to update dashboard
-                await saveAnalysisResult({
-                    ticker: p.ticker,
-                    action: signal.action,
-                    confidence: signal.confidence,
-                    reason: signal.reason,
-                    sentimentScore: signal.sentimentBoost ? signal.sentimentBoost / 10 : undefined,
-                    sentimentConfidence: signal.sentimentBoost ? Math.abs(signal.sentimentBoost) / 10 : undefined,
-                    rsi: signal.indicators?.rsi,
-                    macdHistogram: signal.indicators?.macdHistogram,
-                    volumeRatio: signal.indicators?.volumeRatio,
-                    priceChangePct: signal.indicators?.priceChangePct,
-                    sma50: signal.indicators?.sma50,
-                    sma200: signal.indicators?.sma200
-                });
-
-                const displayAction = signal.action === 'HOLD' ? 'MONITORING' : signal.action;
-                const logMsg = `  ${p.ticker}: ${displayAction} ${signal.confidence > 0 ? `(${signal.confidence}%)` : ''} - ${signal.reason}`;
-                logs.push(logMsg);
-
-                if (signal.action !== 'HOLD' && signal.confidence > 60) {
-                    signals.push(logMsg);
+            for (let j = 0; j < batchResults.length; j++) {
+                const r = batchResults[j];
+                if (r.status === 'fulfilled') {
+                    const { p, signal } = r.value;
+                    const displayAction = signal.action === 'HOLD' ? 'MONITORING' : signal.action;
+                    const logMsg = `  ${p.ticker}: ${displayAction} ${signal.confidence > 0 ? `(${signal.confidence}%)` : ''} - ${signal.reason}`;
+                    logs.push(logMsg);
+                    if (signal.action !== 'HOLD' && signal.confidence > 60) signals.push(logMsg);
+                } else {
+                    const ticker = batch[j].ticker;
+                    console.error(`[Monitor] Error ${ticker}:`, r.reason?.message);
+                    logs.push(`  ${ticker}: Error ${r.reason?.message}`);
                 }
-            } catch (err: any) {
-                console.error(`[Monitor] Error ${p.ticker}:`, err.message);
-                logs.push(`  ${p.ticker}: Error ${err.message}`);
             }
         }
 
