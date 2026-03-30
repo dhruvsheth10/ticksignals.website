@@ -321,7 +321,11 @@ export async function getTransactions(limit = 50): Promise<PortfolioTransaction[
 
 export async function getHistory(days = 30): Promise<PortfolioHistory[]> {
     const db = getTurso();
-    const r = await db.execute({ sql: 'SELECT * FROM portfolio_history ORDER BY date ASC LIMIT ?', args: [days] });
+    // Fetch the most recent N rows (DESC), then re-sort oldest-first for chart ordering
+    const r = await db.execute({
+        sql: 'SELECT * FROM (SELECT * FROM portfolio_history ORDER BY date DESC LIMIT ?) ORDER BY date ASC',
+        args: [days],
+    });
     return (r.rows as any[]).map(row => ({
         date: row.date,
         total_value: row.total_value,
@@ -399,21 +403,57 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
     }
 
     if (timeframe === '1W') {
-        // Last 7 days — sample every ~1 hour using SQLite window trick
-        const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        // Last 7 days — high-frequency snapshots downsampled to ~1/hour.
+        // Fill weekday gaps using portfolio_history daily EOD values when snapshots are absent.
+        const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const cutoffStr = cutoff.toISOString();
         const r = await db.execute({
             sql: `SELECT timestamp, total_value, cash_balance, equity_value
                   FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
-            args: [cutoff]
+            args: [cutoffStr]
         });
-        const allRows = (r.rows as any[]).map(row => ({
+        const snapshotRows: PortfolioSnapshot[] = (r.rows as any[]).map(row => ({
             timestamp: row.timestamp,
             total_value: row.total_value,
             cash_balance: row.cash_balance,
             equity_value: row.equity_value,
         }));
-        // Downsample: keep 1 per hour
-        return downsampleByInterval(allRows, 60 * 60 * 1000);
+
+        // Build a set of days that already have snapshot coverage
+        const coveredDays = new Set(snapshotRows.map(p => p.timestamp.slice(0, 10)));
+
+        // Fetch portfolio_history for the past 7 days to fill in uncovered weekdays
+        const histR = await db.execute({
+            sql: `SELECT date, total_value, cash_balance, equity_value
+                  FROM portfolio_history WHERE date >= ? ORDER BY date ASC`,
+            args: [cutoff.toISOString().slice(0, 10)]
+        });
+        const syntheticRows: PortfolioSnapshot[] = (histR.rows as any[])
+            .filter((row: any) => {
+                const iso = normalizeDateToISO(row.date);
+                if (!iso) return false;
+                const dk = iso.slice(0, 10);
+                const d = new Date(iso);
+                const isWeekend = d.getUTCDay() === 0 || d.getUTCDay() === 6;
+                return !isWeekend && !coveredDays.has(dk);
+            })
+            .map((row: any) => {
+                const iso = normalizeDateToISO(row.date)!;
+                return {
+                    timestamp: iso.slice(0, 10) + 'T16:00:00Z',
+                    total_value: row.total_value,
+                    cash_balance: row.cash_balance,
+                    equity_value: row.equity_value,
+                };
+            });
+
+        // Merge and sort by timestamp
+        const merged = [...snapshotRows, ...syntheticRows].sort(
+            (a, b) => a.timestamp.localeCompare(b.timestamp)
+        );
+
+        // Downsample: keep at most 1 per hour
+        return downsampleByInterval(merged, 60 * 60 * 1000);
     }
 
     // ── 30D / ALL: daily fill-forward logic ──
@@ -458,12 +498,13 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
     cursor.setUTCHours(16, 0, 0, 0); // 4pm UTC (~market close)
     while (cursor.toISOString().slice(0, 10) <= todayStr) {
         const dayKey = cursor.toISOString().slice(0, 10);
+        const isWeekend = cursor.getUTCDay() === 0 || cursor.getUTCDay() === 6; // Sun=0, Sat=6
         const entry = dailyMap.get(dayKey);
         if (entry) {
             lastKnown = entry;
         }
-        // Don't add today — we'll append live snapshots below
-        if (dayKey !== todayStr) {
+        // Skip weekends and today (today's live data appended below)
+        if (!isWeekend && dayKey !== todayStr) {
             result.push({
                 timestamp: cursor.toISOString(),
                 total_value: lastKnown.total_value,
