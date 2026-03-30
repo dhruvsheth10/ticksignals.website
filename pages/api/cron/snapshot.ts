@@ -45,3 +45,7 @@ export default async function handler(
         res.status(500).json({ error: e.message });
     }
 }
+
+export const config = {
+    maxDuration: 300,
+};

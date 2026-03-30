@@ -113,6 +113,14 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     // ── 2. Sell Logic: Trail Stops, Partial Profits, Signals ──
     const currentHoldings = await getHoldings(); // re-fetch after price sync
+    // Cache analyzeTicker results within this cycle so each ticker is only analyzed once.
+    const analysisCache = new Map<string, TradeSignal>();
+    const getCachedSignal = async (ticker: string): Promise<TradeSignal> => {
+        if (!analysisCache.has(ticker)) {
+            analysisCache.set(ticker, await analyzeTicker(ticker));
+        }
+        return analysisCache.get(ticker)!;
+    };
     for (const holding of currentHoldings) {
         const price = holding.current_price;
         if (!price || price <= 0) continue;
@@ -238,7 +246,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         // ─── 2d. ADX Trend Death + Time Exit ───
         // If held > 2 days, trend is dying (ADX < 15), and position is flat/red → exit
         if (daysHeld > 2 && returnPct < 1) {
-            const signal = await analyzeTicker(holding.ticker);
+            const signal = await getCachedSignal(holding.ticker);
             const adx = signal.indicators?.adx ?? 25;
 
             if (adx < 15 || (signal.action === 'SELL' && signal.confidence >= 60)) {
@@ -255,7 +263,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         // ─── 2e. Full Analysis Sell Signal ───
         // Only run full analysis if not already handled above
         if (type !== 'PORTFOLIO_CHECK' || daysHeld > 1) {
-            const signal = await analyzeTicker(holding.ticker);
+            const signal = await getCachedSignal(holding.ticker);
             try {
                 await saveAnalysisResult({
                     ticker: holding.ticker, action: signal.action,

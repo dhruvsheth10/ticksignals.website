@@ -206,19 +206,54 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     // Build chart data
     const chartData = useMemo(() => {
         if (!data) return [];
+
+        // Use detailed intraday snapshots when we have ≥2 points
         if (data.detailedHistory) {
             const detailed = data.detailedHistory[timeframe];
-            if (detailed && detailed.length > 0) {
+            if (detailed && detailed.length >= 2) {
                 return detailed.map(p => ({
                     date: p.timestamp,
                     total_value: p.total_value,
                 }));
             }
         }
-        return timeframe === '1D' ? data.history.slice(-2)
-            : timeframe === '1W' ? data.history.slice(-7)
-                : data.history;
+
+        // Fallback: synthesise a reasonable view from coarse daily history
+        const currentPoint = { date: new Date().toISOString(), total_value: data.status.total_value };
+
+        if (timeframe === '1D') {
+            // Show today's market-open value → current value.
+            // Find the most-recent daily history entry to use as the opening baseline.
+            const sorted = [...data.history].sort((a, b) => a.date.localeCompare(b.date));
+            const lastEntry = sorted[sorted.length - 1];
+            const openVal = lastEntry?.total_value ?? data.status.total_value;
+
+            // 9:30 AM ET = 13:30 UTC
+            const openTime = new Date();
+            openTime.setUTCHours(13, 30, 0, 0);
+            // If we're before market open, push open time back 24h so the line still renders
+            if (openTime > new Date()) openTime.setUTCDate(openTime.getUTCDate() - 1);
+
+            return [
+                { date: openTime.toISOString(), total_value: openVal },
+                currentPoint,
+            ];
+        }
+
+        if (timeframe === '1W') {
+            const pts = data.history.slice(-7).map(h => ({ date: h.date, total_value: h.total_value }));
+            return pts.length >= 2 ? pts : [...pts, currentPoint];
+        }
+
+        // 30D
+        return data.history.map(h => ({ date: h.date, total_value: h.total_value }));
     }, [data, timeframe]);
+
+    // Determine if the selected timeframe is up or down (for chart colour)
+    const chartIsPositive = useMemo(() => {
+        if (chartData.length < 2) return true;
+        return chartData[chartData.length - 1].total_value >= chartData[0].total_value;
+    }, [chartData]);
 
     // Compute timeframe P&L (persistent display)
     const timeframePnL = useMemo(() => {
@@ -433,92 +468,103 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                             </div>
                         )}
 
-                        <div
-                            className="h-[300px] w-full select-none"
-                            style={{
-                                outline: 'none',
-                                cursor: isDragging ? 'col-resize' : 'crosshair',
-                                opacity: chartVisible ? 1 : 0,
-                                transition: 'opacity 0.2s ease-in-out',
-                            }}
-                            onMouseLeave={() => { if (isDragging) handleMouseUp(); }}
-                        >
-                            <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
-                                <AreaChart
-                                    data={chartData}
-                                    style={{ outline: 'none' }}
-                                    onMouseDown={handleMouseDown}
-                                    onMouseMove={handleMouseMove}
-                                    onMouseUp={handleMouseUp}
+                        {(() => {
+                            const lineColor = chartIsPositive ? '#10b981' : '#ef4444';
+                            const gradientId = `chartGrad-${timeframe}-${chartIsPositive ? 'pos' : 'neg'}`;
+                            const gradientColor = chartIsPositive ? '#10b981' : '#ef4444';
+                            return (
+                                <div
+                                    className="h-[300px] w-full select-none"
+                                    style={{
+                                        outline: 'none',
+                                        cursor: isDragging ? 'col-resize' : 'crosshair',
+                                        opacity: chartVisible ? 1 : 0,
+                                        transition: 'opacity 0.2s ease-in-out',
+                                    }}
+                                    onMouseLeave={() => { if (isDragging) handleMouseUp(); }}
                                 >
-                                    <defs>
-                                        <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                                        </linearGradient>
-                                    </defs>
-                                    <XAxis
-                                        dataKey="date"
-                                        tickFormatter={(str) => {
-                                            const d = parseDate(str);
-                                            if (isNaN(d.getTime())) return '';
-                                            if (timeframe === '1D') {
-                                                return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-                                            }
-                                            if (timeframe === '1W') {
-                                                return d.toLocaleDateString(undefined, { weekday: 'short', hour: 'numeric' });
-                                            }
-                                            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-                                        }}
-                                        stroke="#4b5563"
-                                        fontSize={12}
-                                    />
-                                    <YAxis
-                                        domain={['auto', 'auto']}
-                                        tickFormatter={(val) => `$${(val / 1000).toFixed(0)}k`}
-                                        stroke="#4b5563"
-                                        fontSize={12}
-                                    />
-                                    <Tooltip
-                                        contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }}
-                                        itemStyle={{ color: '#10b981' }}
-                                        formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString()}`, 'Value'] as [string, string]}
-                                        labelFormatter={(label) => {
-                                            const d = parseDate(label);
-                                            if (isNaN(d.getTime())) return String(label);
-                                            if (timeframe === '1D') {
-                                                return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                                            }
-                                            if (timeframe === '1W') {
-                                                return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
-                                            }
-                                            return d.toLocaleDateString();
-                                        }}
-                                    />
-                                    {refAreaLeft && refAreaRight && (
-                                        <ReferenceArea
-                                            x1={refAreaLeft}
-                                            x2={refAreaRight}
-                                            strokeOpacity={0.3}
-                                            stroke="#6ee7b7"
-                                            fill="#6ee7b7"
-                                            fillOpacity={0.08}
-                                        />
-                                    )}
-                                    <Area
-                                        type="monotone"
-                                        dataKey="total_value"
-                                        stroke="#10b981"
-                                        strokeWidth={2}
-                                        fillOpacity={1}
-                                        fill="url(#colorValue)"
-                                        activeDot={{ stroke: 'none', r: 4 }}
-                                        style={{ outline: 'none' }}
-                                        isAnimationActive={false}
-                                    />
-                                </AreaChart>
-                            </ResponsiveContainer>
-                        </div>
+                                    <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
+                                        <AreaChart
+                                            data={chartData}
+                                            margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
+                                            style={{ outline: 'none' }}
+                                            onMouseDown={handleMouseDown}
+                                            onMouseMove={handleMouseMove}
+                                            onMouseUp={handleMouseUp}
+                                        >
+                                            <defs>
+                                                <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+                                                    <stop offset="0%" stopColor={gradientColor} stopOpacity={0.18} />
+                                                    <stop offset="100%" stopColor={gradientColor} stopOpacity={0} />
+                                                </linearGradient>
+                                            </defs>
+                                            <XAxis
+                                                dataKey="date"
+                                                tickFormatter={(str) => {
+                                                    const d = parseDate(str);
+                                                    if (isNaN(d.getTime())) return '';
+                                                    if (timeframe === '1D') return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+                                                    if (timeframe === '1W') return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+                                                    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                                                }}
+                                                stroke="#374151"
+                                                tick={{ fill: '#6b7280', fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                                minTickGap={40}
+                                            />
+                                            <YAxis
+                                                domain={[
+                                                    (dataMin: number) => dataMin - Math.max((dataMin) * 0.001, 50),
+                                                    (dataMax: number) => dataMax + Math.max((dataMax) * 0.001, 50),
+                                                ]}
+                                                tickFormatter={(val) => `$${(val / 1000).toFixed(1)}k`}
+                                                stroke="#374151"
+                                                tick={{ fill: '#6b7280', fontSize: 11 }}
+                                                axisLine={false}
+                                                tickLine={false}
+                                                width={58}
+                                            />
+                                            <Tooltip
+                                                contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#fff', fontSize: 13 }}
+                                                itemStyle={{ color: lineColor }}
+                                                cursor={{ stroke: '#4b5563', strokeWidth: 1, strokeDasharray: '4 2' }}
+                                                formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 'Value'] as [string, string]}
+                                                labelFormatter={(label) => {
+                                                    const d = parseDate(label);
+                                                    if (isNaN(d.getTime())) return String(label);
+                                                    if (timeframe === '1D') return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+                                                    if (timeframe === '1W') return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
+                                                    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+                                                }}
+                                            />
+                                            {refAreaLeft && refAreaRight && (
+                                                <ReferenceArea
+                                                    x1={refAreaLeft}
+                                                    x2={refAreaRight}
+                                                    strokeOpacity={0.3}
+                                                    stroke={lineColor}
+                                                    fill={lineColor}
+                                                    fillOpacity={0.06}
+                                                />
+                                            )}
+                                            <Area
+                                                type="monotone"
+                                                dataKey="total_value"
+                                                stroke={lineColor}
+                                                strokeWidth={2}
+                                                fillOpacity={1}
+                                                fill={`url(#${gradientId})`}
+                                                dot={false}
+                                                activeDot={{ r: 4, fill: lineColor, stroke: '#111827', strokeWidth: 2 }}
+                                                style={{ outline: 'none' }}
+                                                isAnimationActive={false}
+                                            />
+                                        </AreaChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            );
+                        })()}
                     </div>
 
                     {/* Holdings Table */}

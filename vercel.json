@@ -11,6 +11,10 @@
       "schedule": "30 14 * * 1-5"
     },
     {
+      "path": "/api/cron/trade?type=PORTFOLIO_CHECK",
+      "schedule": "0 15,16,17,18,19 * * 1-5"
+    },
+    {
       "path": "/api/cron/trade?type=CLOSE",
       "schedule": "0 20 * * 1-5"
     }
