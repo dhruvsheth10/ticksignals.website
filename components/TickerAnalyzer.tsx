@@ -196,19 +196,32 @@ function PriceChart({ points, range, accentColor }: { points: ChartPoint[]; rang
     ctx.fill();
   }, [points, dims, accentColor, range, xScale, yScale, yMin, yMax, plotW, plotH, margin.left, margin.top]);
 
-  // Mouse / touch handler
+  // Mouse / touch — fractional index so price/date update smoothly along X (not jump per candle)
   const handlePointer = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     const cvs = canvasRef.current;
     if (!cvs || points.length < 2) return;
     const rect = cvs.getBoundingClientRect();
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const relX = clientX - rect.left;
-    const idx = Math.round(((relX - margin.left) / plotW) * (points.length - 1));
-    const clampedIdx = Math.max(0, Math.min(points.length - 1, idx));
-    const px = xScale(clampedIdx);
-    const py = yScale(points[clampedIdx].close);
-    setHoverInfo({ x: px, y: py, point: points[clampedIdx], idx: clampedIdx });
-  }, [points, plotW, margin.left, xScale, yScale]);
+    const fIdx = ((relX - margin.left) / plotW) * (points.length - 1);
+    const clampedF = Math.max(0, Math.min(points.length - 1, fIdx));
+    const i0 = Math.floor(clampedF);
+    const i1 = Math.min(points.length - 1, i0 + 1);
+    const u = clampedF - i0;
+    const closeInterp = points[i0].close + (points[i1].close - points[i0].close) * u;
+    const t0 = new Date(points[i0].date).getTime();
+    const t1 = new Date(points[i1].date).getTime();
+    const dateMs = t0 + (t1 - t0) * u;
+    const px = margin.left + (clampedF / Math.max(points.length - 1, 1)) * plotW;
+    const py = yScale(closeInterp);
+    const nearestIdx = u < 0.5 ? i0 : i1;
+    setHoverInfo({
+      x: px,
+      y: py,
+      point: { date: new Date(dateMs).toISOString(), close: closeInterp },
+      idx: nearestIdx,
+    });
+  }, [points, plotW, margin.left, yScale]);
 
   const handleLeave = useCallback(() => setHoverInfo(null), []);
 

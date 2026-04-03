@@ -544,7 +544,30 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
         result.push(...todaySampled);
     }
 
-    return result;
+    return smoothIsolatedPortfolioValueSpikes(result);
+}
+
+/**
+ * Drop single-point spikes when the previous and next points agree but the middle
+ * jumps (bad snapshot / race). Keeps real trends: if neighbors differ materially, untouched.
+ */
+function smoothIsolatedPortfolioValueSpikes(points: PortfolioSnapshot[]): PortfolioSnapshot[] {
+    if (points.length < 3) return points;
+    const out = points.map((p) => ({ ...p }));
+    for (let i = 1; i < out.length - 1; i++) {
+        const prev = out[i - 1].total_value;
+        const cur = out[i].total_value;
+        const next = out[i + 1].total_value;
+        const mid = (prev + next) / 2;
+        const neighborSpread = Math.abs(prev - next);
+        const scale = Math.max(Math.abs(prev), Math.abs(next), 1);
+        if (neighborSpread > scale * 0.02) continue;
+        const dev = Math.abs(cur - mid);
+        const threshold = Math.max(scale * 0.015, 400);
+        if (dev <= threshold) continue;
+        out[i] = { ...out[i], total_value: mid };
+    }
+    return out;
 }
 
 /**
@@ -915,28 +938,63 @@ export async function cleanupOldLogs(): Promise<{ cycles: number; analysis: numb
     };
 }
 
+/** YYYY-MM-DD in America/New_York (aligns with US equity session calendar). */
+function getCalendarDateNY(d: Date): string {
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
 /**
- * Get each ticker's market open price for today from intraday_holdings.
- * Returns a map of ticker → open price (earliest bar of the day).
+ * Parse timestamps from DB: full ISO with Z, or UTC without suffix (see snapshot-service roundTo10Min).
+ */
+function parseUtcInstant(iso: string): Date {
+    const s = (iso || '').trim();
+    if (!s) return new Date(NaN);
+    if (s.endsWith('Z')) return new Date(s);
+    if (/[+-]\d{2}:?\d{2}$/.test(s)) return new Date(s);
+    return new Date(s + 'Z');
+}
+
+/**
+ * Get each ticker's session open for the current US trading calendar day.
+ * Uses intraday_holdings (10m bars, earliest bar per ticker on that NY date), then falls back to
+ * today's OPEN row in daily_snapshots when intraday has not started yet.
  */
 export async function getDayOpenPrices(): Promise<Map<string, number>> {
     const db = getTurso();
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayCutoff = today.toISOString().slice(0, 10);
+    const nyToday = getCalendarDateNY(new Date());
+
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const cutoffStr = cutoff.toISOString().slice(0, 19);
 
     const r = await db.execute({
         sql: `SELECT ticker, open, bar_time FROM intraday_holdings
               WHERE bar_time >= ? ORDER BY bar_time ASC`,
-        args: [todayCutoff]
+        args: [cutoffStr],
     });
 
     const dayOpens = new Map<string, number>();
     for (const row of r.rows as any[]) {
-        if (!dayOpens.has(row.ticker)) {
+        if (dayOpens.has(row.ticker)) continue;
+        const barNy = getCalendarDateNY(parseUtcInstant(row.bar_time));
+        if (barNy === nyToday) {
             dayOpens.set(row.ticker, row.open);
         }
     }
+
+    const snapR = await db.execute({
+        sql: `SELECT ticker, open, snapshot_at FROM daily_snapshots
+              WHERE interval_type = 'OPEN'
+              ORDER BY snapshot_at DESC
+              LIMIT 400`,
+        args: [],
+    });
+    for (const row of snapR.rows as any[]) {
+        const snapNy = getCalendarDateNY(parseUtcInstant(row.snapshot_at));
+        if (snapNy === nyToday && !dayOpens.has(row.ticker)) {
+            dayOpens.set(row.ticker, row.open);
+        }
+    }
+
     return dayOpens;
 }
 

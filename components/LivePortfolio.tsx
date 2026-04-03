@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea } from 'recharts';
+import type { MouseHandlerDataParam } from 'recharts';
+import { XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceArea } from 'recharts';
 import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity, FileText, TrendingUp, TrendingDown } from 'lucide-react';
 import BlurText from './BlurText';
 import AnimatedNumber from './AnimatedNumber';
@@ -57,6 +58,84 @@ const RETURN_LABELS: Record<ReturnMode, string> = {
 const RETURN_CYCLE: ReturnMode[] = ['total_pct', 'day_pct', 'total_dollar'];
 
 const parseDate = (d: string) => new Date(d.endsWith('Z') ? d : (d.includes('T') ? d + 'Z' : d.replace(' ', 'T') + 'Z'));
+
+type PortfolioChartRow = { date: string; total_value: number };
+
+/** Horizontal span of the plot (screen px) from Recharts SVG grid lines, or a safe fallback. */
+function getRechartsPlotXBounds(wrapper: HTMLElement): { left: number; width: number } | null {
+    const svg = wrapper.querySelector('.recharts-surface') as SVGSVGElement | null;
+    if (!svg) return null;
+    const verticals = svg.querySelectorAll('.recharts-cartesian-grid-vertical line');
+    if (verticals.length >= 2) {
+        const r0 = (verticals[0] as SVGGraphicsElement).getBoundingClientRect();
+        const r1 = (verticals[verticals.length - 1] as SVGGraphicsElement).getBoundingClientRect();
+        const left = Math.min(r0.left, r1.left);
+        const right = Math.max(r0.right, r1.right);
+        return { left, width: Math.max(1, right - left) };
+    }
+    const rect = svg.getBoundingClientRect();
+    const axisReserve = 58;
+    const pad = 6;
+    const left = rect.left + axisReserve + pad;
+    const width = Math.max(1, rect.width - axisReserve - pad * 2);
+    return { left, width };
+}
+
+function interpolatePortfolioAtClientX(
+    clientX: number,
+    bounds: { left: number; width: number },
+    rows: PortfolioChartRow[],
+): { value: number; dateStr: string } | null {
+    if (rows.length < 2) return null;
+    const t = (clientX - bounds.left) / bounds.width;
+    if (t < -0.02 || t > 1.02) return null;
+    const clampedT = Math.max(0, Math.min(1, t));
+    const f = clampedT * (rows.length - 1);
+    const i0 = Math.floor(f);
+    const i1 = Math.min(rows.length - 1, i0 + 1);
+    const u = f - i0;
+    const v0 = rows[i0].total_value;
+    const v1 = rows[i1].total_value;
+    const t0 = parseDate(rows[i0].date).getTime();
+    const t1 = parseDate(rows[i1].date).getTime();
+    if (!Number.isFinite(t0) || !Number.isFinite(t1)) return null;
+    const value = v0 + (v1 - v0) * u;
+    const timeMs = t0 + (t1 - t0) * u;
+    return { value, dateStr: new Date(timeMs).toISOString() };
+}
+
+function formatPortfolioTooltipLabel(dateStr: string, timeframe: '1D' | '1W' | '30D'): string {
+    const d = parseDate(dateStr);
+    if (isNaN(d.getTime())) return String(dateStr);
+    if (timeframe === '1D') return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    if (timeframe === '1W') return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+type PortfolioTooltipContentProps = {
+    active?: boolean;
+    payload?: { value?: number; dataKey?: unknown }[];
+    label?: string | number;
+    fluid: { value: number; dateStr: string } | null;
+    timeframe: '1D' | '1W' | '30D';
+    lineColor: string;
+};
+
+function PortfolioTooltipContent({ active, payload, label, fluid, timeframe, lineColor }: PortfolioTooltipContentProps) {
+    if (!active || !payload?.length) return null;
+    const val = fluid?.value ?? (payload[0]?.value as number);
+    const rawLabel = fluid?.dateStr ?? label;
+    const labelStr = typeof rawLabel === 'string' ? rawLabel : String(rawLabel ?? '');
+    return (
+        <div className="rounded-lg border border-gray-600 bg-gray-900 px-3 py-2 text-[13px] shadow-lg" style={{ color: '#fff' }}>
+            <div className="mb-1 text-xs text-gray-400">{formatPortfolioTooltipLabel(labelStr, timeframe)}</div>
+            <div className="font-medium tabular-nums" style={{ color: lineColor }}>
+                ${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="text-[11px] text-gray-500 mt-0.5">Value</div>
+        </div>
+    );
+}
 
 /**
  * Extract the return % from a SELL transaction's notes.
@@ -153,6 +232,9 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     // Chart fade transition
     const [chartVisible, setChartVisible] = useState(true);
 
+    /** Interpolated hover value (cursor X → between samples) for fluid tooltip */
+    const [chartFluidHover, setChartFluidHover] = useState<{ value: number; dateStr: string } | null>(null);
+
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
 
     const fetchPortfolio = useCallback(async (silent = false) => {
@@ -197,6 +279,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         setSelectionInfo(null);
         setRefAreaLeft(null);
         setRefAreaRight(null);
+        setChartFluidHover(null);
         setTimeout(() => {
             setTimeframe(tf);
             setChartVisible(true);
@@ -267,21 +350,36 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         return { changeDollar, changePct };
     }, [chartData]);
 
-    // Drag handlers for range selection
-    const handleMouseDown = useCallback((e: any) => {
-        if (e && e.activeLabel) {
-            setRefAreaLeft(e.activeLabel);
+    // Drag handlers for range selection (Recharts 3: first arg is MouseHandlerDataParam)
+    const handleMouseDown = useCallback((state: MouseHandlerDataParam) => {
+        if (state.activeLabel != null && state.activeLabel !== '') {
+            setRefAreaLeft(String(state.activeLabel));
             setRefAreaRight(null);
             setIsDragging(true);
             setSelectionInfo(null);
         }
     }, []);
 
-    const handleMouseMove = useCallback((e: any) => {
-        if (isDragging && e && e.activeLabel) {
-            setRefAreaRight(e.activeLabel);
-        }
-    }, [isDragging]);
+    const handleChartMouseMove = useCallback(
+        (state: MouseHandlerDataParam, e: React.SyntheticEvent) => {
+            if (isDragging) {
+                if (state.activeLabel != null && state.activeLabel !== '') {
+                    setRefAreaRight(String(state.activeLabel));
+                }
+                return;
+            }
+            const target = e.currentTarget as HTMLElement;
+            const bounds = getRechartsPlotXBounds(target);
+            const cx = (e.nativeEvent as MouseEvent).clientX;
+            if (bounds && chartData.length >= 2) {
+                const interp = interpolatePortfolioAtClientX(cx, bounds, chartData);
+                setChartFluidHover(interp);
+            } else {
+                setChartFluidHover(null);
+            }
+        },
+        [isDragging, chartData],
+    );
 
     const handleMouseUp = useCallback(() => {
         if (!isDragging || !refAreaLeft) {
@@ -481,7 +579,10 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                         opacity: chartVisible ? 1 : 0,
                                         transition: 'opacity 0.2s ease-in-out',
                                     }}
-                                    onMouseLeave={() => { if (isDragging) handleMouseUp(); }}
+                                    onMouseLeave={() => {
+                                        setChartFluidHover(null);
+                                        if (isDragging) handleMouseUp();
+                                    }}
                                 >
                                     <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
                                         <AreaChart
@@ -489,7 +590,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
                                             style={{ outline: 'none' }}
                                             onMouseDown={handleMouseDown}
-                                            onMouseMove={handleMouseMove}
+                                            onMouseMove={handleChartMouseMove}
                                             onMouseUp={handleMouseUp}
                                         >
                                             <defs>
@@ -526,17 +627,23 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                 width={58}
                                             />
                                             <Tooltip
-                                                contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#fff', fontSize: 13 }}
-                                                itemStyle={{ color: lineColor }}
-                                                cursor={{ stroke: '#4b5563', strokeWidth: 1, strokeDasharray: '4 2' }}
-                                                formatter={(val: number | undefined) => [`$${(val ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 'Value'] as [string, string]}
-                                                labelFormatter={(label) => {
-                                                    const d = parseDate(label);
-                                                    if (isNaN(d.getTime())) return String(label);
-                                                    if (timeframe === '1D') return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-                                                    if (timeframe === '1W') return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
-                                                    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-                                                }}
+                                                shared
+                                                isAnimationActive={false}
+                                                allowEscapeViewBox={{ x: true, y: true }}
+                                                reverseDirection={{ x: false, y: true }}
+                                                offset={32}
+                                                cursor={{ stroke: '#6b7280', strokeWidth: 1, strokeDasharray: '4 3' }}
+                                                wrapperStyle={{ outline: 'none', zIndex: 20 }}
+                                                content={(props) => (
+                                                    <PortfolioTooltipContent
+                                                        active={props.active}
+                                                        payload={props.payload as PortfolioTooltipContentProps['payload']}
+                                                        label={props.label}
+                                                        fluid={chartFluidHover}
+                                                        timeframe={timeframe}
+                                                        lineColor={lineColor}
+                                                    />
+                                                )}
                                             />
                                             {refAreaLeft && refAreaRight && (
                                                 <ReferenceArea
