@@ -19,7 +19,7 @@ import https from 'https';
 
 // ── In-Memory Cache (1 hour TTL) ──
 const sentimentCache = new Map<string, { result: SentimentScore; timestamp: number }>();
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL_MS = 60 * 60 * 2000; // 1 hour
 
 // ══════════════════════════════════════════════════════════════════════
 // YAHOO NEWS FETCHER

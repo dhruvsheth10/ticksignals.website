@@ -171,7 +171,8 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
         // ─── 2b. Gap Protection ───
         // If today's open gapped significantly from yesterday's close:
-        // - Gap DOWN > 3% on a losing position → exit immediately (don't wait for -5% hard stop)
+        // - Gap DOWN > 3% on a losing position → risk exit
+        //   (now we allow a "soft" partial exit when the model is not bearish enough)
         // - Gap UP > 3% but price filling below open → lock in early partial to protect gains
         const partialSells = holding.partial_sells || 0;
         try {
@@ -183,12 +184,36 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
                 // Gap-down: opened sharply lower and position is underwater → bail out
                 if (gapPct < -3 && returnPct < 0) {
-                    await executeTrade(holding.ticker, 'SELL', holding.shares, price,
-                        `Gap-Down Exit: ${gapPct.toFixed(1)}% gap, position at ${returnPct.toFixed(1)}%`);
-                    summaryLines.push(`  SELL ${holding.ticker}: gap-down ${gapPct.toFixed(1)}% exit (${returnPct.toFixed(1)}%)`);
-                    const fresh = await getPortfolioStatus();
-                    await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
-                    totalEquity -= holding.shares * price;
+                    // Soft-exit logic: only full-exit if the model also agrees (bearish + confidence).
+                    const signal = await getCachedSignal(holding.ticker);
+                    const shouldFullExit = signal.action === 'SELL' && signal.confidence >= 60;
+
+                    if (shouldFullExit) {
+                        await executeTrade(holding.ticker, 'SELL', holding.shares, price,
+                            `Gap-Down Exit: ${gapPct.toFixed(1)}% gap, position at ${returnPct.toFixed(1)}% (model SELL ${signal.confidence}%)`);
+                        summaryLines.push(`  SELL ${holding.ticker}: gap-down ${gapPct.toFixed(1)}% exit (${returnPct.toFixed(1)}%)`);
+                        const fresh = await getPortfolioStatus();
+                        await updatePortfolioStatus(
+                            fresh.cash_balance + (holding.shares * price),
+                            totalEquity - (holding.shares * price)
+                        );
+                        totalEquity -= holding.shares * price;
+                    } else if (partialSells === 0 && holding.shares > 1) {
+                        const sellShares = Math.max(1, Math.floor(holding.shares * 0.33));
+                        await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                            `Gap-Down Exit: ${gapPct.toFixed(1)}% gap, position at ${returnPct.toFixed(1)}% (soft model ${signal.action} ${signal.confidence}%)`);
+                        summaryLines.push(`  PARTIAL SELL ${holding.ticker}: gap-down ${gapPct.toFixed(1)}% soft-exit (${returnPct.toFixed(1)}%)`);
+                        const fresh = await getPortfolioStatus();
+                        await updatePortfolioStatus(
+                            fresh.cash_balance + (sellShares * price),
+                            totalEquity - (sellShares * price)
+                        );
+                        totalEquity -= sellShares * price;
+                    } else {
+                        // If we've already partially exited this position, skip the additional gap-down trim
+                        // and let trailing stop / later cycle logic handle it.
+                        summaryLines.push(`  ${holding.ticker}: gap-down detected but model not bearish enough (skip exit)`);
+                    }
                     continue;
                 }
 
@@ -395,9 +420,18 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         else if (currentCount >= 10) requiredConfidence = 80;
         else if (currentCount >= 8) requiredConfidence = 72;
 
-        if (candidate.confidence < requiredConfidence) {
+        // Slightly riskier than before, but weighted by sentiment-quality (confidence already
+        // includes technical/fundamental points; sentimentBoost is an extra quality factor).
+        const riskierDelta = 2; // "play slightly riskier"
+        const sentimentGateWeight = 0.35; // avoid over-weighting sentiment twice
+        const effectiveConfidence = candidate.confidence + (candidate.sentimentBoost ?? 0) * sentimentGateWeight;
+        const gateConfidence = Math.max(0, requiredConfidence - riskierDelta);
+
+        if (effectiveConfidence < gateConfidence) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
-                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - below dynamic threshold ${requiredConfidence}% (skip)`);
+                summaryLines.push(
+                    `  ${candidate.ticker} ${candidate.confidence}% (eff ${effectiveConfidence.toFixed(1)}%) - below dynamic threshold ${gateConfidence}% (skip)`
+                );
             }
             continue;
         }

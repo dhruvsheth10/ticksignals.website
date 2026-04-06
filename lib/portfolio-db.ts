@@ -999,7 +999,7 @@ export async function getDayOpenPrices(): Promise<Map<string, number>> {
 }
 
 /**
- * Get tickers that were sold via stop-loss, trailing stop, or hard stop
+ * Get tickers that were sold via risk exits or profit trims
  * within the last N days. Used by the trading engine to enforce a
  * re-entry cooldown and avoid whipsaw (stop → immediate re-buy).
  */
@@ -1012,7 +1012,17 @@ export async function getRecentStopLossSells(cooldownDays: number = 3): Promise<
     const r = await db.execute({
         sql: `SELECT DISTINCT ticker FROM portfolio_transactions
               WHERE type = 'SELL' AND date >= ?
-              AND (notes LIKE '%Trailing Stop%' OR notes LIKE '%Hard Stop%' OR notes LIKE '%Gap-Down Exit%' OR notes LIKE '%Trend Exit%')`,
+              AND (
+                notes LIKE '%Trailing Stop%' OR
+                notes LIKE '%Hard Stop%' OR
+                notes LIKE '%Gap-Down Exit%' OR
+                notes LIKE '%Trend Exit%' OR
+                -- Profit trims can still lead to immediate re-entry whipsaw on the remainder.
+                notes LIKE '%Partial Profit%' OR
+                notes LIKE '%Full Profit Exit%' OR
+                -- Gap-fill protection is also a partial trim.
+                notes LIKE '%Gap-Fill Protect%'
+              )`,
         args: [cutoffStr],
     });
 
