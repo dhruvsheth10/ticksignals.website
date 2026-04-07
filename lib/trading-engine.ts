@@ -1,6 +1,6 @@
 
 import { getPool } from './db';
-import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot, savePortfolioSnapshot, cleanupOldSnapshots, getRecentStopLossSells } from './portfolio-db';
+import { getPortfolioStatus, getHoldings, executeTrade, updatePortfolioStatus, saveAnalysisResult, saveCycleLog, getDailySnapshots, getIntradayBars, updateHoldingPrice, updateHighWaterMark, saveHistorySnapshot, savePortfolioSnapshot, cleanupOldSnapshots, getRecentStopLossSells, acquireEngineLock, releaseEngineLock } from './portfolio-db';
 import { MarketDataService } from './market-data';
 import { getSentimentScore } from './sentiment';
 
@@ -97,6 +97,16 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     const db = getPool();
     const summaryLines: string[] = [];
     const isPortfolioOnly = type === 'PORTFOLIO_CHECK';
+    const engineLockName = 'trading-engine-cycle';
+    const lockToken = await acquireEngineLock(engineLockName, 240);
+    if (!lockToken) {
+        const msg = `[Engine] Skipping ${type}: another trading cycle is already running.`;
+        console.warn(msg);
+        try { await saveCycleLog(type, msg); } catch { }
+        return;
+    }
+
+    try {
 
     // ── 1. Sync Current Prices + Update High Water Marks ──
     const holdings = await getHoldings();
@@ -505,6 +515,9 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     }
 
     console.log('[Engine] Trading Cycle Completed');
+    } finally {
+        await releaseEngineLock(engineLockName, lockToken).catch(() => { });
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════

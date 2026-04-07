@@ -235,6 +235,16 @@ export async function initPortfolioTables(): Promise<void> {
     `);
     await db.execute(`CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_ts ON portfolio_snapshots(timestamp)`);
 
+    // Global engine lock to prevent overlapping trading cycles (cross-route / cross-cron).
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS engine_locks (
+        lock_name TEXT PRIMARY KEY,
+        owner_token TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+
     console.log('Portfolio + trading tables (Turso) initialized.');
 }
 
@@ -666,12 +676,19 @@ export async function executeTrade(
     const totalAmount = shares * price;
     const now = new Date().toISOString();
 
-    // 1. Log Transaction
-    await db.execute({
-        sql: `INSERT INTO portfolio_transactions (ticker, type, shares, price, total_amount, notes, date)
-              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        args: [ticker, type, shares, price, totalAmount, notes || null, now],
+    // Best-effort duplicate suppression for overlapping cron executions:
+    // skip if an equivalent trade was already recorded very recently.
+    const duplicateCutoff = new Date(Date.now() - 120 * 1000).toISOString();
+    const dup = await db.execute({
+        sql: `SELECT id FROM portfolio_transactions
+              WHERE ticker = ? AND type = ? AND shares = ? AND price = ? AND COALESCE(notes,'') = COALESCE(?, '')
+                AND date >= ?
+              ORDER BY date DESC LIMIT 1`,
+        args: [ticker, type, shares, price, notes || null, duplicateCutoff],
     });
+    if ((dup.rows as any[]).length > 0) {
+        return;
+    }
 
     if (type === 'BUY') {
         const ex = await db.execute({ sql: 'SELECT * FROM portfolio_holdings WHERE ticker = ?', args: [ticker] });
@@ -692,10 +709,20 @@ export async function executeTrade(
                 args: [ticker, shares, price, price, totalAmount, now, price, tradeMetadata?.atr || 0],
             });
         }
+
+        // Log transaction only after holding mutation succeeds.
+        await db.execute({
+            sql: `INSERT INTO portfolio_transactions (ticker, type, shares, price, total_amount, notes, date)
+                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            args: [ticker, type, shares, price, totalAmount, notes || null, now],
+        });
     } else {
         const ex = await db.execute({ sql: 'SELECT * FROM portfolio_holdings WHERE ticker = ?', args: [ticker] });
         const h = (ex.rows[0] as any);
         if (!h) throw new Error(`Cannot sell ${ticker}, not in portfolio.`);
+        if (shares > h.shares + 0.0001) {
+            throw new Error(`Cannot sell ${shares} ${ticker}; only ${h.shares} available.`);
+        }
         const newShares = h.shares - shares;
         if (newShares <= 0.0001) {
             await db.execute({ sql: 'DELETE FROM portfolio_holdings WHERE ticker = ?', args: [ticker] });
@@ -712,7 +739,46 @@ export async function executeTrade(
                 args: [newShares, price, newShares * price, newPartialSells, now, ticker],
             });
         }
+
+        // Log transaction only after holding mutation succeeds.
+        await db.execute({
+            sql: `INSERT INTO portfolio_transactions (ticker, type, shares, price, total_amount, notes, date)
+                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            args: [ticker, type, shares, price, totalAmount, notes || null, now],
+        });
     }
+}
+
+// ── Global Engine Lock (prevents overlapping cycles) ──
+export async function acquireEngineLock(lockName: string, ttlSeconds = 180): Promise<string | null> {
+    const db = getTurso();
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const now = new Date().toISOString();
+
+    // Clear stale lock first, then attempt to claim.
+    await db.execute({
+        sql: `DELETE FROM engine_locks WHERE lock_name = ? AND expires_at < ?`,
+        args: [lockName, now],
+    });
+
+    const ins = await db.execute({
+        sql: `INSERT OR IGNORE INTO engine_locks (lock_name, owner_token, expires_at, updated_at)
+              VALUES (?, ?, ?, ?)`,
+        args: [lockName, token, expiresAt, now],
+    });
+    if (ins.rowsAffected && ins.rowsAffected > 0) {
+        return token;
+    }
+    return null;
+}
+
+export async function releaseEngineLock(lockName: string, ownerToken: string): Promise<void> {
+    const db = getTurso();
+    await db.execute({
+        sql: `DELETE FROM engine_locks WHERE lock_name = ? AND owner_token = ?`,
+        args: [lockName, ownerToken],
+    });
 }
 
 // ── Trading Analysis + Cycle Log (used by trading-engine) ──
