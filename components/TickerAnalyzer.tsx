@@ -83,6 +83,15 @@ function formatHoverDate(dateStr: string): string {
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+function formatShortDate(dateStr: string): string {
+  // Handles both ISO strings (from interpolation) and plain date strings (YYYY-MM-DD)
+  const d = dateStr.includes('T') ? new Date(dateStr) : new Date(dateStr + 'T12:00:00');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${mm}/${dd}/${yy}`;
+}
+
 function formatPrice(n: number): string {
   return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -236,16 +245,19 @@ function PriceChart({ points, range, accentColor }: { points: ChartPoint[]; rang
   return (
     <div ref={containerRef} className="relative select-none" style={{ touchAction: 'none' }}>
       {/* Hover price header */}
-      <div className="flex items-baseline gap-3 mb-2 min-h-[28px]">
+      <div className="flex items-baseline gap-3 mb-1 min-h-[28px]">
         <span className="text-2xl font-bold text-white">
           {hoverInfo ? formatPrice(hoverInfo.point.close) : formatPrice(lastClose)}
         </span>
         <span className={`text-sm font-semibold ${isPositive ? 'text-emerald-400' : 'text-red-400'}`}>
           {isPositive ? '+' : ''}{change.toFixed(2)} ({isPositive ? '+' : ''}{changePct.toFixed(2)}%)
         </span>
-        {hoverInfo && (
-          <span className="text-xs text-gray-500 ml-auto">{formatHoverDate(hoverInfo.point.date)}</span>
-        )}
+      </div>
+      {/* Date below price */}
+      <div className="text-[11px] text-gray-500 mb-2 tracking-wide">
+        {hoverInfo
+          ? formatShortDate(hoverInfo.point.date)
+          : formatShortDate(points[points.length - 1]?.date ?? '')}
       </div>
 
       {/* Canvas */}
