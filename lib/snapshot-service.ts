@@ -10,7 +10,7 @@ import {
     saveIntradayBar,
     initPortfolioTables,
 } from './portfolio-db';
-import { getPool } from './db';
+import { getMonitoredProspects } from './db';
 
 type SnapshotInterval = 'OPEN' | 'MID';
 
@@ -35,7 +35,7 @@ function roundTo10Min(iso: string): string {
     const min = d.getMinutes();
     const rounded = Math.floor(min / 10) * 10;
     d.setMinutes(rounded, 0, 0);
-    return d.toISOString().slice(0, 19);
+    return d.toISOString();
 }
 
 /**
@@ -65,7 +65,7 @@ async function fetchIntradayAndRVOL(ticker: string): Promise<{
 
 /**
  * Twice-daily snapshot: 9:35 ET (OPEN) or 2:00 ET (MID).
- * Saves for: holdings + buy candidates (top 75 from screener).
+ * Saves for: holdings + the aligned daily swing watchlist from monitored_prospects.
  */
 export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Promise<{ ok: number; fail: number; errors: any[] }> {
     await initPortfolioTables();
@@ -73,18 +73,13 @@ export async function runTwiceDailySnapshot(intervalType: SnapshotInterval): Pro
     const holdings = await getHoldings();
     const tickersFromHoldings = holdings.map(h => h.ticker);
 
-    // Buy candidates from screener (fundamental filter)
+    // Daily swing watchlist from the canonical two-stage universe builder
     let tickersFromScreener: string[] = [];
     try {
-        const db = getPool();
-        const r = await db.query(`
-            SELECT ticker FROM screener_cache
-            WHERE roe_pct > 12 AND gross_margin_pct > 8 AND debt_to_equity < 1.0 AND market_cap > 1000000000
-            ORDER BY pe_ratio ASC, roe_pct DESC LIMIT 75
-        `);
-        tickersFromScreener = (r.rows || []).map((row: any) => row.ticker);
+        const prospects = await getMonitoredProspects();
+        tickersFromScreener = prospects.map((row) => row.ticker);
     } catch (e) {
-        console.warn('[Snapshot] Screener query failed, using holdings only');
+        console.warn('[Snapshot] Prospect query failed, using holdings only');
     }
 
     // Yahoo Finance has no strict rate limit so we can fetch in parallel.

@@ -26,6 +26,22 @@ function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function getNyDateKey(tsMs: number): string {
+    return new Date(tsMs).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+function computeBarVWAP(bars: Array<{ high: number; low: number; close: number; volume: number }>): number {
+    let totalPV = 0;
+    let totalVolume = 0;
+    for (const bar of bars) {
+        if (bar.volume <= 0) continue;
+        const typical = (bar.high + bar.low + bar.close) / 3;
+        totalPV += typical * bar.volume;
+        totalVolume += bar.volume;
+    }
+    return totalVolume > 0 ? totalPV / totalVolume : 0;
+}
+
 // Simple HTTPS GET wrapper
 async function httpsGet(urlString: string): Promise<any> {
     const res = await fetch(urlString, {
@@ -188,37 +204,72 @@ export class MarketDataService {
         } | null;
         error?: string;
     }> {
-        // ── 1. Yahoo Finance (primary — no rate-limit sleep, no API key needed) ──
+        // ── 1. Yahoo Finance intraday bars (primary, free, unofficial) ──
         for (const host of ['query2.finance.yahoo.com', 'query1.finance.yahoo.com']) {
             try {
-                const data = await httpsGet(
-                    `https://${host}/v8/finance/chart/${ticker}?interval=1d&range=2mo`
+                const intraday = await httpsGet(
+                    `https://${host}/v8/finance/chart/${ticker}?interval=5m&range=5d&includePrePost=false`
                 );
-                const result = data?.chart?.result?.[0];
+                const result = intraday?.chart?.result?.[0];
                 if (result?.timestamp && result?.indicators?.quote?.[0]) {
                     const quote = result.indicators.quote[0];
-                    const len: number = result.timestamp.length;
-                    if (len >= 2) {
-                        const i = len - 1;
-                        const todayClose: number = quote.close[i];
-                        if (todayClose && todayClose > 0) {
-                            const today = {
-                                o: (quote.open[i] ?? todayClose) as number,
-                                h: (quote.high[i] ?? todayClose) as number,
-                                l: (quote.low[i] ?? todayClose) as number,
-                                c: todayClose,
-                                v: (quote.volume[i] ?? 0) as number,
-                            };
-                            const historicalVols = (quote.volume as number[])
-                                .slice(0, i)
-                                .filter((v: number) => v > 0);
-                            const avgVol = historicalVols.length > 0
-                                ? historicalVols.reduce((a: number, b: number) => a + b, 0) / historicalVols.length
-                                : today.v;
-                            const rvol = avgVol > 0 ? today.v / avgVol : 1;
-                            const vwap = (today.h + today.l + today.c) / 3;
-                            return { data: { ...today, vwap, rvol } };
-                        }
+                    const bars = result.timestamp.map((ts: number, i: number) => {
+                        const close = quote.close?.[i];
+                        if (close === null || close === undefined || close <= 0) return null;
+                        return {
+                            ts,
+                            dateNy: getNyDateKey(ts * 1000),
+                            open: (quote.open?.[i] ?? close) as number,
+                            high: (quote.high?.[i] ?? close) as number,
+                            low: (quote.low?.[i] ?? close) as number,
+                            close: close as number,
+                            volume: (quote.volume?.[i] ?? 0) as number,
+                        };
+                    }).filter(Boolean) as Array<{
+                        ts: number;
+                        dateNy: string;
+                        open: number;
+                        high: number;
+                        low: number;
+                        close: number;
+                        volume: number;
+                    }>;
+
+                    const latestDateNy = bars[bars.length - 1]?.dateNy;
+                    const sessionBars = latestDateNy
+                        ? bars.filter((bar) => bar.dateNy === latestDateNy)
+                        : [];
+
+                    if (sessionBars.length > 0) {
+                        const session = {
+                            o: sessionBars[0].open,
+                            h: Math.max(...sessionBars.map((bar: {
+                                high: number;
+                            }) => bar.high)),
+                            l: Math.min(...sessionBars.map((bar: {
+                                low: number;
+                            }) => bar.low)),
+                            c: sessionBars[sessionBars.length - 1].close,
+                            v: sessionBars.reduce((sum: number, bar: {
+                                volume: number;
+                            }) => sum + bar.volume, 0),
+                        };
+
+                        const dailyData = await httpsGet(
+                            `https://${host}/v8/finance/chart/${ticker}?interval=1d&range=2mo`
+                        );
+                        const dailyResult = dailyData?.chart?.result?.[0];
+                        const dailyQuote = dailyResult?.indicators?.quote?.[0];
+                        const historicalVols = (dailyQuote?.volume || [])
+                            .slice(-21, -1)
+                            .filter((v: number | null | undefined) => !!v && v > 0) as number[];
+                        const avgVol = historicalVols.length > 0
+                            ? historicalVols.reduce((a: number, b: number) => a + b, 0) / historicalVols.length
+                            : session.v;
+                        const rvol = avgVol > 0 ? session.v / avgVol : 1;
+                        const vwap = computeBarVWAP(sessionBars);
+
+                        return { data: { ...session, vwap, rvol } };
                     }
                 }
             } catch (e: any) {
@@ -226,61 +277,98 @@ export class MarketDataService {
             }
         }
 
-        // ── 2. Finnhub fallback (rate-limited: 1 req/sec) ──
+        // ── 2. Finnhub 5-minute bars fallback (rate-limited) ──
         try {
             const to = Math.floor(Date.now() / 1000);
-            const from = to - (35 * 86400);
-            const data = await this.fetchFinnhub(ticker, 'D', from, to);
+            const from = to - (5 * 86400);
+            const data = await this.fetchFinnhub(ticker, '5', from, to);
 
             if (data.s !== 'ok' || !data.t || data.t.length < 2) {
                 throw new Error(`Finnhub error: ${data.s}`);
             }
 
-            const len = data.t.length;
-            const today = {
-                o: data.o[len - 1] as number,
-                h: data.h[len - 1] as number,
-                l: data.l[len - 1] as number,
-                c: data.c[len - 1] as number,
-                v: data.v[len - 1] as number,
+            const bars = data.t.map((ts: number, i: number) => ({
+                dateNy: getNyDateKey(ts * 1000),
+                open: data.o[i] as number,
+                high: data.h[i] as number,
+                low: data.l[i] as number,
+                close: data.c[i] as number,
+                volume: data.v[i] as number,
+            })).filter((bar: {
+                dateNy: string;
+                open: number;
+                high: number;
+                low: number;
+                close: number;
+                volume: number;
+            }) => bar.close > 0);
+
+            const latestDateNy = bars[bars.length - 1]?.dateNy;
+            const sessionBars = latestDateNy
+                ? bars.filter((bar: {
+                    dateNy: string;
+                }) => bar.dateNy === latestDateNy)
+                : [];
+            if (sessionBars.length === 0) {
+                throw new Error('No intraday session bars');
+            }
+
+            const session = {
+                o: sessionBars[0].open,
+                h: Math.max(...sessionBars.map((bar: {
+                    high: number;
+                }) => bar.high)),
+                l: Math.min(...sessionBars.map((bar: {
+                    low: number;
+                }) => bar.low)),
+                c: sessionBars[sessionBars.length - 1].close,
+                v: sessionBars.reduce((sum: number, bar: {
+                    volume: number;
+                }) => sum + bar.volume, 0),
             };
-            const historicalVols = (data.v as number[]).slice(0, len - 1).filter((v: number) => v > 0);
+            const historicalDaily = await this.getDailyCandles(ticker, 30);
+            const historicalVols = historicalDaily
+                .slice(-21, -1)
+                .map((candle) => candle.volume)
+                .filter((volume) => volume > 0);
             const avgVol = historicalVols.length > 0
-                ? historicalVols.reduce((a: number, b: number) => a + b, 0) / historicalVols.length
-                : today.v;
-            const rvol = avgVol > 0 ? today.v / avgVol : 1;
-            const vwap = (today.h + today.l + today.c) / 3;
-            return { data: { ...today, vwap, rvol } };
+                ? historicalVols.reduce((a, b) => a + b, 0) / historicalVols.length
+                : session.v;
+            const rvol = avgVol > 0 ? session.v / avgVol : 1;
+            const vwap = computeBarVWAP(sessionBars);
+            return { data: { ...session, vwap, rvol } };
 
         } catch (finnhubErr: any) {
             console.warn(`[MarketData] Finnhub intraday failed for ${ticker}:`, finnhubErr.message);
         }
 
-        // ── 3. Alpha Vantage last resort ──
+        // ── 3. Daily proxy last resort ──
         try {
-            if (STATE.avUsed >= LIMITS.AV_DAILY) throw new Error('Alpha Vantage daily limit reached');
-            const avData = await this.fetchAlphaVantage(ticker);
-            const ts = avData['Time Series (Daily)'];
-            if (!ts) throw new Error('No AV data');
-            const dates = Object.keys(ts).sort();
-            if (dates.length < 2) throw new Error('Insufficient AV history');
-            const todayDate = dates[dates.length - 1];
-            const todayCandle = ts[todayDate];
-            const today = {
-                o: parseFloat(todayCandle['1. open']),
-                h: parseFloat(todayCandle['2. high']),
-                l: parseFloat(todayCandle['3. low']),
-                c: parseFloat(todayCandle['4. close']),
-                v: parseFloat(todayCandle['5. volume']),
+            const candles = await this.getDailyCandles(ticker, 30);
+            const today = candles[candles.length - 1];
+            if (!today) throw new Error('No daily candles');
+            const historicalVols = candles
+                .slice(-21, -1)
+                .map((candle) => candle.volume)
+                .filter((volume) => volume > 0);
+            const avgVol = historicalVols.length > 0
+                ? historicalVols.reduce((a, b) => a + b, 0) / historicalVols.length
+                : today.volume;
+            const rvol = avgVol > 0 ? today.volume / avgVol : 1;
+            const vwap = (today.high + today.low + today.close) / 3;
+            return {
+                data: {
+                    o: today.open,
+                    h: today.high,
+                    l: today.low,
+                    c: today.close,
+                    v: today.volume,
+                    vwap,
+                    rvol,
+                }
             };
-            const histDates = dates.slice(Math.max(0, dates.length - 31), dates.length - 1);
-            const vols = histDates.map(d => parseFloat(ts[d]['5. volume'])).filter(v => v > 0);
-            const avgVol = vols.length > 0 ? vols.reduce((a, b) => a + b, 0) / vols.length : today.v;
-            const rvol = avgVol > 0 ? today.v / avgVol : 1;
-            const vwap = (today.h + today.l + today.c) / 3;
-            return { data: { ...today, vwap, rvol } };
-        } catch (avErr: any) {
-            return { data: null, error: `All sources failed for ${ticker}: ${avErr.message}` };
+        } catch (proxyErr: any) {
+            return { data: null, error: `All sources failed for ${ticker}: ${proxyErr.message}` };
         }
     }
 

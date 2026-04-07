@@ -3,8 +3,9 @@ import crypto from 'crypto';
 import { TICKER_LIST } from '../../lib/tickers';
 
 const SCAN_PASSWORD_HASH = 'ea4de091b760a4e538140c342585130649e646c54d4939ae7f142bb81d5506fa';
-import { initScreenerTable, upsertScreenerRow, getScreenerData, getScanMetadata, updateMonitoredProspects, getPool } from '../../lib/db';
+import { initScreenerTable, upsertScreenerRow, getScreenerData, getScanMetadata, updateMonitoredProspects } from '../../lib/db';
 import https from 'https';
+import { buildDailySwingProspects } from '../../lib/daily-swing-universe';
 
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -382,74 +383,20 @@ export default async function handler(
 
 
             // ── Phase 4: Update Monitored Prospects ──
-            // Sector-diversified, momentum-blended scoring (50 stocks).
-            //
-            // CHANGES vs v1:
-            //   1. Blends 70% fundamental score (ROE + gross margin) with 30% price
-            //      momentum (proximity to 52-week high vs low). This naturally rotates
-            //      stocks in/out as prices move day-to-day.
-            //   2. Caps at 7 stocks per sector to prevent concentration (was 100% uncapped).
-            //   3. Expanded from 35 → 50 to broaden the opportunity set.
+            // Canonical daily swing universe:
+            //   Stage 1: quality / liquidity / 52-week regime filter from screener_cache
+            //   Stage 2: live daily swing engine re-scores candidates for trend timing
             try {
-                const db = getPool();
-                const candidates = await db.query(`
-                    WITH scored AS (
-                        SELECT 
-                            ticker,
-                            sector,
-                            roe_pct,
-                            gross_margin_pct,
-                            pe_ratio,
-                            price,
-                            fifty_two_week_high,
-                            fifty_two_week_low,
-                            -- Fundamental score (normalized to ~0-100 range)
-                            (roe_pct + gross_margin_pct) AS fund_score,
-                            -- Momentum score: how far above the 52-week low (0 = at low, 100 = at high)
-                            CASE WHEN fifty_two_week_high > fifty_two_week_low AND fifty_two_week_low > 0
-                                 THEN ((price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low)) * 100
-                                 ELSE 50 
-                            END AS momentum_score
-                        FROM screener_cache
-                        WHERE roe_pct > 10 
-                          AND gross_margin_pct > 5 
-                          AND debt_to_equity < 150 
-                          AND market_cap > 1000000000
-                          AND price IS NOT NULL
-                          AND fifty_two_week_high IS NOT NULL
-                          AND fifty_two_week_low IS NOT NULL
-                    ),
-                    blended AS (
-                        SELECT 
-                            ticker,
-                            sector,
-                            -- 70% fundamentals + 30% momentum
-                            (fund_score * 0.7 + momentum_score * 0.3) AS blended_score,
-                            -- Sector rank: cap per sector for diversification
-                            ROW_NUMBER() OVER (
-                                PARTITION BY sector 
-                                ORDER BY (fund_score * 0.7 + momentum_score * 0.3) DESC
-                            ) AS rank_in_sector
-                        FROM scored
-                    )
-                    SELECT ticker, blended_score AS score
-                    FROM blended
-                    WHERE rank_in_sector <= 7
-                    ORDER BY blended_score DESC
-                    LIMIT 50
-                `);
-
-                const prospects = candidates.rows.map((r: any) => ({
-                    ticker: r.ticker,
-                    score: r.score || 0
-                }));
+                const prospects = await buildDailySwingProspects(50);
 
                 await updateMonitoredProspects(prospects);
 
                 try {
                     const { saveCycleLog } = require('../../lib/portfolio-db');
-                    const header = `Global scan completed.\nUpdated monitored prospects list (Count: ${prospects.length}):\n`;
-                    const listSummary = prospects.map((p: any) => `${p.ticker} (Score: ${Number(p.score).toFixed(2)})`).join('\n');
+                    const header = `Global scan completed.\nDaily swing monitored prospects (Count: ${prospects.length}):\n`;
+                    const listSummary = prospects.map((p: any) =>
+                        `${p.ticker} (Score: ${Number(p.score).toFixed(2)}, Stage1: ${Number(p.stage1Score).toFixed(2)}, Stage2: ${Number(p.stage2Score).toFixed(2)}, ${p.action} ${p.confidence}%)`
+                    ).join('\n');
                     await saveCycleLog('PROSPECTS_UPDATE', header + listSummary);
                 } catch (logErr: any) {
                     console.error('[Screener] Failed to save cycle log:', logErr.message);

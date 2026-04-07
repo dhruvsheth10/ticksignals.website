@@ -1,0 +1,622 @@
+{
+  "generatedAt": "2026-04-06T23:44:45.656Z",
+  "tickers": [
+    "AAPL",
+    "FTNT",
+    "UI",
+    "NVDA",
+    "KLAC",
+    "LYFT",
+    "BYD",
+    "MEDP",
+    "RPRX",
+    "EXEL",
+    "TPL",
+    "V"
+  ],
+  "strategy": {
+    "startDate": "2025-05-20",
+    "endDate": "2026-04-02",
+    "initialCapital": 100000,
+    "endingCapital": 102740.2,
+    "totalReturnPct": 2.74,
+    "maxDrawdownPct": -0.99,
+    "trades": 73,
+    "winRatePct": 84
+  },
+  "benchmark": {
+    "ticker": "SPY",
+    "totalReturnPct": 10.62
+  },
+  "holdout": {
+    "splitDate": "2025-12-29",
+    "inSampleReturnPct": 2.25,
+    "outOfSampleReturnPct": 0.48
+  },
+  "trades": [
+    {
+      "date": "2025-06-11",
+      "ticker": "EXEL",
+      "type": "BUY",
+      "shares": 157,
+      "price": 42.57,
+      "reason": "ADX 38 (trend confirmed), RSI 35 (oversold dip buy), StochRSI 27 (oversold bounce), MACD bullish, +15.0% momentum"
+    },
+    {
+      "date": "2025-06-18",
+      "ticker": "LYFT",
+      "type": "BUY",
+      "shares": 392,
+      "price": 15,
+      "reason": "ADX 27 (trend confirmed), RSI 29 (oversold dip buy), StochRSI 12 (oversold bounce), MACD bullish, Near BB lower band, -10.8% (price declining)"
+    },
+    {
+      "date": "2025-06-20",
+      "ticker": "EXEL",
+      "type": "SELL",
+      "shares": 157,
+      "price": 40.68,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-06-25",
+      "ticker": "LYFT",
+      "type": "SELL",
+      "shares": 129,
+      "price": 15.95,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-07-02",
+      "ticker": "LYFT",
+      "type": "SELL",
+      "shares": 131,
+      "price": 16.13,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-07-09",
+      "ticker": "LYFT",
+      "type": "SELL",
+      "shares": 132,
+      "price": 16.46,
+      "reason": "Full profit +9%"
+    },
+    {
+      "date": "2025-08-04",
+      "ticker": "KLAC",
+      "type": "BUY",
+      "shares": 7,
+      "price": 896.75,
+      "reason": "ADX 25 (trend confirmed), RSI 40 (neutral), StochRSI 9 (oversold bounce), MACD bullish, Volume +50%, RVOL 1.5x, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2025-08-13",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 940,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-08-13",
+      "ticker": "BYD",
+      "type": "BUY",
+      "shares": 68,
+      "price": 83.42,
+      "reason": "ADX 28 (trend confirmed), RSI 50 (momentum pullback), StochRSI 14 (oversold bounce), MACD bullish, OBV accumulation"
+    },
+    {
+      "date": "2025-08-15",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 924.23,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-08-18",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 3,
+      "price": 873.04,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-08-21",
+      "ticker": "NVDA",
+      "type": "BUY",
+      "shares": 37,
+      "price": 174.85,
+      "reason": "ADX 37 (trend confirmed), RSI 46 (neutral), StochRSI 6 (oversold bounce), MACD bullish, Volume +37%, Near BB lower band"
+    },
+    {
+      "date": "2025-08-26",
+      "ticker": "BYD",
+      "type": "SELL",
+      "shares": 22,
+      "price": 85.98,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-08-27",
+      "ticker": "NVDA",
+      "type": "SELL",
+      "shares": 12,
+      "price": 181.98,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-09-02",
+      "ticker": "NVDA",
+      "type": "SELL",
+      "shares": 25,
+      "price": 170,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-09-05",
+      "ticker": "NVDA",
+      "type": "BUY",
+      "shares": 40,
+      "price": 168.03,
+      "reason": "ADX 45 (trend confirmed), RSI 32 (oversold dip buy), StochRSI 9 (oversold bounce), MACD bullish, Near BB lower band"
+    },
+    {
+      "date": "2025-09-11",
+      "ticker": "NVDA",
+      "type": "SELL",
+      "shares": 13,
+      "price": 179.68,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-09-16",
+      "ticker": "BYD",
+      "type": "SELL",
+      "shares": 46,
+      "price": 83.47,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-09-18",
+      "ticker": "NVDA",
+      "type": "SELL",
+      "shares": 27,
+      "price": 173.98,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-09-19",
+      "ticker": "BYD",
+      "type": "BUY",
+      "shares": 87,
+      "price": 83.46,
+      "reason": "ADX 31 (trend confirmed), RSI 31 (oversold dip buy), StochRSI 14 (oversold bounce), MACD bullish, Near BB lower band"
+    },
+    {
+      "date": "2025-09-22",
+      "ticker": "MEDP",
+      "type": "BUY",
+      "shares": 13,
+      "price": 498.6,
+      "reason": "ADX 32 (trend confirmed), StochRSI 26 (oversold bounce), MACD bullish, Volume +123%, RVOL 2.2x, OBV accumulation, +10.0% momentum"
+    },
+    {
+      "date": "2025-09-30",
+      "ticker": "BYD",
+      "type": "SELL",
+      "shares": 28,
+      "price": 87.3,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-10-01",
+      "ticker": "MEDP",
+      "type": "SELL",
+      "shares": 4,
+      "price": 514.54,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-10-02",
+      "ticker": "MEDP",
+      "type": "SELL",
+      "shares": 4,
+      "price": 525.75,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-10-07",
+      "ticker": "BYD",
+      "type": "SELL",
+      "shares": 59,
+      "price": 85.46,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-10-10",
+      "ticker": "MEDP",
+      "type": "SELL",
+      "shares": 5,
+      "price": 518.2,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-10-14",
+      "ticker": "LYFT",
+      "type": "BUY",
+      "shares": 364,
+      "price": 19.56,
+      "reason": "ADX 42 (trend confirmed), RSI 37 (oversold dip buy), StochRSI 18 (oversold bounce), MACD bullish, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2025-10-14",
+      "ticker": "AAPL",
+      "type": "BUY",
+      "shares": 27,
+      "price": 246.6,
+      "reason": "ADX 44 (trend confirmed), RSI 39 (oversold dip buy), StochRSI 14 (oversold bounce), MACD bullish, OBV accumulation"
+    },
+    {
+      "date": "2025-10-21",
+      "ticker": "LYFT",
+      "type": "SELL",
+      "shares": 120,
+      "price": 20.1,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-10-21",
+      "ticker": "AAPL",
+      "type": "SELL",
+      "shares": 8,
+      "price": 261.88,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-10-22",
+      "ticker": "AAPL",
+      "type": "SELL",
+      "shares": 9,
+      "price": 262.65,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-10-23",
+      "ticker": "KLAC",
+      "type": "BUY",
+      "shares": 6,
+      "price": 1106.66,
+      "reason": "ADX 26 (trend confirmed), RSI 47 (momentum pullback), StochRSI 25 (oversold bounce), MACD bullish, Volume +31%"
+    },
+    {
+      "date": "2025-10-23",
+      "ticker": "MEDP",
+      "type": "BUY",
+      "shares": 10,
+      "price": 619.55,
+      "reason": "ADX 28 (trend confirmed), RSI 55 (neutral), StochRSI 21 (oversold bounce), MACD bullish, Volume +128%, RVOL 2.3x, +9.9% momentum"
+    },
+    {
+      "date": "2025-10-24",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 1,
+      "price": 1166,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-10-27",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 1200,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-10-28",
+      "ticker": "AAPL",
+      "type": "SELL",
+      "shares": 10,
+      "price": 268.99,
+      "reason": "Full profit +9%"
+    },
+    {
+      "date": "2025-10-28",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 3,
+      "price": 1206.68,
+      "reason": "Full profit +9%"
+    },
+    {
+      "date": "2025-10-29",
+      "ticker": "MEDP",
+      "type": "SELL",
+      "shares": 10,
+      "price": 585.24,
+      "reason": "Daily hard stop"
+    },
+    {
+      "date": "2025-10-31",
+      "ticker": "LYFT",
+      "type": "SELL",
+      "shares": 244,
+      "price": 19.92,
+      "reason": "Time exit (12d, ADX 17)"
+    },
+    {
+      "date": "2025-11-20",
+      "ticker": "NVDA",
+      "type": "BUY",
+      "shares": 45,
+      "price": 195.95,
+      "reason": "ADX 25 (trend confirmed), RSI 37 (oversold dip buy), StochRSI 14 (oversold bounce), MACD bullish, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2025-11-21",
+      "ticker": "NVDA",
+      "type": "SELL",
+      "shares": 45,
+      "price": 181.24,
+      "reason": "Daily hard stop"
+    },
+    {
+      "date": "2025-11-26",
+      "ticker": "KLAC",
+      "type": "BUY",
+      "shares": 5,
+      "price": 1157.75,
+      "reason": "ADX 28 (trend confirmed), RSI 38 (oversold dip buy), StochRSI 25 (oversold bounce), MACD bullish"
+    },
+    {
+      "date": "2025-12-04",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 1,
+      "price": 1202.56,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-12-11",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 1229.28,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-12-11",
+      "ticker": "MEDP",
+      "type": "BUY",
+      "shares": 10,
+      "price": 558.54,
+      "reason": "ADX 34 (trend confirmed), RSI 39 (oversold dip buy), StochRSI 23 (oversold bounce), MACD bullish, Near BB lower band, -7.0% (price declining)"
+    },
+    {
+      "date": "2025-12-15",
+      "ticker": "RPRX",
+      "type": "BUY",
+      "shares": 177,
+      "price": 38.39,
+      "reason": "ADX 25 (trend confirmed), RSI 46 (neutral), StochRSI 25 (oversold bounce), MACD bullish, Volume +47%, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2025-12-18",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 1223,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2025-12-19",
+      "ticker": "EXEL",
+      "type": "BUY",
+      "shares": 140,
+      "price": 42.76,
+      "reason": "ADX 30 (trend confirmed), RSI 39 (oversold dip buy), StochRSI 14 (oversold bounce), MACD bullish"
+    },
+    {
+      "date": "2025-12-22",
+      "ticker": "EXEL",
+      "type": "SELL",
+      "shares": 46,
+      "price": 44.25,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2025-12-23",
+      "ticker": "EXEL",
+      "type": "SELL",
+      "shares": 47,
+      "price": 46.76,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2025-12-24",
+      "ticker": "EXEL",
+      "type": "SELL",
+      "shares": 47,
+      "price": 46.8,
+      "reason": "Full profit +9%"
+    },
+    {
+      "date": "2025-12-26",
+      "ticker": "AAPL",
+      "type": "BUY",
+      "shares": 24,
+      "price": 274.16,
+      "reason": "ADX 34 (trend confirmed), RSI 34 (oversold dip buy), StochRSI 31, MACD bullish, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2026-01-02",
+      "ticker": "MEDP",
+      "type": "SELL",
+      "shares": 10,
+      "price": 558.66,
+      "reason": "Time exit (13d, ADX 12)"
+    },
+    {
+      "date": "2026-01-06",
+      "ticker": "RPRX",
+      "type": "SELL",
+      "shares": 58,
+      "price": 39.68,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2026-01-06",
+      "ticker": "AAPL",
+      "type": "SELL",
+      "shares": 24,
+      "price": 267,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2026-01-08",
+      "ticker": "RPRX",
+      "type": "SELL",
+      "shares": 59,
+      "price": 41.39,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2026-01-16",
+      "ticker": "RPRX",
+      "type": "SELL",
+      "shares": 60,
+      "price": 39.72,
+      "reason": "Daily trailing stop"
+    },
+    {
+      "date": "2026-02-03",
+      "ticker": "MEDP",
+      "type": "BUY",
+      "shares": 12,
+      "price": 591.36,
+      "reason": "ADX 30 (trend confirmed), RSI 46 (neutral), StochRSI 6 (oversold bounce), MACD bullish, Volume +47%, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2026-02-05",
+      "ticker": "MEDP",
+      "type": "SELL",
+      "shares": 12,
+      "price": 562.37,
+      "reason": "Daily hard stop"
+    },
+    {
+      "date": "2026-02-09",
+      "ticker": "KLAC",
+      "type": "BUY",
+      "shares": 4,
+      "price": 1440,
+      "reason": "ADX 29 (trend confirmed), RSI 43 (momentum pullback), StochRSI 15 (oversold bounce), MACD bullish, OBV accumulation, +8.9% momentum"
+    },
+    {
+      "date": "2026-02-23",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 1,
+      "price": 1489.87,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2026-02-26",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 1,
+      "price": 1545.11,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2026-03-04",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 1466.3,
+      "reason": "Time exit (15d, ADX 15)"
+    },
+    {
+      "date": "2026-03-10",
+      "ticker": "KLAC",
+      "type": "BUY",
+      "shares": 4,
+      "price": 1421.1,
+      "reason": "ADX 28 (trend confirmed), RSI 46 (neutral), StochRSI 25 (oversold bounce), MACD bullish, OBV accumulation, Near BB lower band"
+    },
+    {
+      "date": "2026-03-12",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 1,
+      "price": 1465,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2026-03-12",
+      "ticker": "UI",
+      "type": "BUY",
+      "shares": 7,
+      "price": 755.08,
+      "reason": "ADX 31 (trend confirmed), RSI 58 (neutral), StochRSI 14 (oversold bounce), MACD bullish, OBV accumulation, +6.6% momentum"
+    },
+    {
+      "date": "2026-03-18",
+      "ticker": "UI",
+      "type": "SELL",
+      "shares": 2,
+      "price": 793.99,
+      "reason": "Partial profit +3%"
+    },
+    {
+      "date": "2026-03-20",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 1,
+      "price": 1511.52,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2026-03-24",
+      "ticker": "UI",
+      "type": "SELL",
+      "shares": 2,
+      "price": 809,
+      "reason": "Partial profit +6%"
+    },
+    {
+      "date": "2026-03-25",
+      "ticker": "KLAC",
+      "type": "SELL",
+      "shares": 2,
+      "price": 1574.31,
+      "reason": "Full profit +9%"
+    },
+    {
+      "date": "2026-03-25",
+      "ticker": "UI",
+      "type": "SELL",
+      "shares": 3,
+      "price": 854,
+      "reason": "Full profit +9%"
+    },
+    {
+      "date": "2026-04-01",
+      "ticker": "TPL",
+      "type": "BUY",
+      "shares": 14,
+      "price": 465,
+      "reason": "ADX 40 (trend confirmed), RSI 29 (oversold dip buy), StochRSI 6 (oversold bounce), MACD bullish, OBV accumulation, Near BB lower band, -9.4% (price declining)"
+    },
+    {
+      "date": "2026-04-02",
+      "ticker": "TPL",
+      "type": "SELL",
+      "shares": 14,
+      "price": 449.12,
+      "reason": "Daily hard stop"
+    }
+  ]
+}

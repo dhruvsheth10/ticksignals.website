@@ -868,8 +868,8 @@ export async function saveIntradayBar(row: IntradayHolding): Promise<void> {
 export async function getIntradayBars(ticker: string, dateStr?: string): Promise<IntradayHolding[]> {
     const db = getTurso();
     const target = dateStr || new Date().toISOString().slice(0, 10);
-    const start = `${target} T00:00:00`;
-    const end = `${target} T23: 59: 59`;
+    const start = `${target}T00:00:00Z`;
+    const end = `${target}T23:59:59Z`;
     const r = await db.execute({
         sql: `SELECT ticker, bar_time, open, high, low, close, volume, vwap
               FROM intraday_holdings WHERE ticker = ? AND bar_time >= ? AND bar_time <= ?
