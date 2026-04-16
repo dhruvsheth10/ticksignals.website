@@ -58,6 +58,38 @@ interface TechnicalIndicators {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// MARKET BENCHMARK (SPY) — 20-day return cache for relative-strength scoring
+// ══════════════════════════════════════════════════════════════════════
+
+let spyReturnCache: { value: number; fetchedAt: number } | null = null;
+const SPY_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * 20-day percent return of SPY. Used as the market benchmark so we can score
+ * each candidate on *relative* strength (outperformers deserve a boost,
+ * laggards get marked down). Cached for 30 min — SPY's 20d return doesn't
+ * meaningfully shift intraday, and this avoids refetching on every ticker.
+ */
+async function getSpyReturn20d(): Promise<number> {
+    const now = Date.now();
+    if (spyReturnCache && now - spyReturnCache.fetchedAt < SPY_CACHE_TTL_MS) {
+        return spyReturnCache.value;
+    }
+    try {
+        const candles = await MarketDataService.getDailyCandles('SPY', 30);
+        if (candles.length < 21) return spyReturnCache?.value ?? 0;
+        const latest = candles[candles.length - 1].close;
+        const past = candles[candles.length - 21].close;
+        if (!past || past <= 0) return spyReturnCache?.value ?? 0;
+        const ret = ((latest - past) / past) * 100;
+        spyReturnCache = { value: ret, fetchedAt: now };
+        return ret;
+    } catch {
+        return spyReturnCache?.value ?? 0;
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // MARKET HOURS
 // ══════════════════════════════════════════════════════════════════════
 
@@ -154,10 +186,16 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             : 0;
 
         // ─── 2a. ATR-Based Trailing Stop ───
-        // If no ATR stored, use 3% of avg_cost as fallback (2% was too tight)
+        // Philosophy: give fresh positions room to breathe, widen a little once
+        // the trade proves itself, and only tighten aggressively on big winners.
+        // Target hold period is 3-14 days, so the trail must tolerate normal
+        // intraday volatility (1-1.5 ATR) for a week+ without getting kicked.
         const atr = holding.atr > 0 ? holding.atr : (holding.avg_cost * 0.03);
-        // Tighten the trailing stop if we're decently in profit (> 2%)
-        const trailMultiplier = returnPct > 2 ? 1.5 : 2.0;
+        let trailMultiplier: number;
+        if (returnPct > 10)      trailMultiplier = 1.5; // lock big gains tight
+        else if (returnPct > 4)  trailMultiplier = 2.4; // let runners run
+        else if (returnPct > 1)  trailMultiplier = 2.2; // breathing room in small profit
+        else                     trailMultiplier = 2.0; // base
         const trailDistance = trailMultiplier * atr;
         const hwm = holding.high_water_mark || holding.avg_cost;
         const trailStopPrice = hwm - trailDistance;
@@ -175,16 +213,20 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         }
 
         // Trailing stop activation: require HWM to have reached a meaningful level
-        // above entry before the trail can trigger. This prevents noise kills on
-        // positions that never confirmed the thesis. 6 of 10 trailing stop losses
-        // in the last 10 days occurred on positions where HWM was < 1% above entry.
-        const trailActivationMin = holding.avg_cost + Math.min(holding.avg_cost * 0.015, atr);
+        // above entry before the trail can trigger. Raised from 1.5% → 2% (or 1
+        // ATR, whichever is larger) to stop noise-killing unproven positions.
+        const trailActivationMin = holding.avg_cost + Math.max(holding.avg_cost * 0.02, atr);
         const trailIsActive = hwm >= trailActivationMin;
 
-        if (daysHeld >= 0.5 && trailIsActive && price < trailStopPrice) {
+        // Wait at least 1 full day (was 0.5) so intraday chop can't exit a
+        // position before the swing thesis has a chance to develop.
+        if (daysHeld >= 1 && trailIsActive && price < trailStopPrice) {
             const sellShares = holding.shares;
+            // Embed signed return% in the note — the cooldown query uses this
+            // to skip profitable trailing exits (which are just profit-taking).
+            const returnTag = `return ${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(1)}%`;
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
-                `Trailing Stop: Price $${price.toFixed(2)} < Trail $${trailStopPrice.toFixed(2)} (HWM $${hwm.toFixed(2)}, ATR $${atr.toFixed(2)})`);
+                `Trailing Stop: Price $${price.toFixed(2)} < Trail $${trailStopPrice.toFixed(2)} (HWM $${hwm.toFixed(2)}, ATR $${atr.toFixed(2)}, ${returnTag})`);
             summaryLines.push(`  SELL ${holding.ticker}: trailing stop (${returnPct.toFixed(1)}%)`);
             const fresh = await getPortfolioStatus();
             await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
@@ -255,36 +297,43 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         } catch (e) { console.error(`[Engine] Gap check failed for ${holding.ticker}`, e); }
 
         // ─── 2c. Scaled Partial Profit Taking ───
+        // Tiers widened to give winners runway (target hold: 3-14 days).
+        // First partial at +4% locks a little; second at +9% books real
+        // profit; full-exit moved to +15% so the trailing stop handles the
+        // long right tail instead of a fixed cap clipping it early.
+        //
+        // Share distribution is ~25% / 33% of remaining / remaining = roughly
+        // 25% / 25% / 50%, so half the position rides the trailing stop.
 
-        // +2% → sell 33% (first partial)
-        if (returnPct >= 2 && partialSells === 0 && holding.shares > 1) {
-            const sellShares = Math.max(1, Math.floor(holding.shares * 0.33));
+        // +4% → sell 25% (first partial lock)
+        if (returnPct >= 4 && partialSells === 0 && holding.shares > 1) {
+            const sellShares = Math.max(1, Math.floor(holding.shares * 0.25));
             await executeTrade(holding.ticker, 'SELL', sellShares, price,
-                `Partial Profit +2% (1/3 position, ${returnPct.toFixed(1)}%)`);
-            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +2% lock 33%`);
-            const fresh = await getPortfolioStatus();
-            await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
-            totalEquity -= sellShares * price;
-            continue; // let the next cycle handle the remaining shares
-        }
-
-        // +4% → sell another 33% (second partial)
-        if (returnPct >= 4 && partialSells === 1 && holding.shares > 1) {
-            const sellShares = Math.max(1, Math.floor(holding.shares * 0.5)); // 50% of remaining ≈ 33% original
-            await executeTrade(holding.ticker, 'SELL', sellShares, price,
-                `Partial Profit +4% (2/3 position, ${returnPct.toFixed(1)}%)`);
-            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +4% lock 50% remaining`);
+                `Partial Profit +4% (1/4 position, ${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +4% lock 25%`);
             const fresh = await getPortfolioStatus();
             await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
             totalEquity -= sellShares * price;
             continue;
         }
 
-        // +6% or more → sell remaining (full exit)
-        if (returnPct >= 6 && partialSells >= 2) {
+        // +9% → sell 33% of remaining (~25% of original)
+        if (returnPct >= 9 && partialSells === 1 && holding.shares > 1) {
+            const sellShares = Math.max(1, Math.floor(holding.shares * 0.33));
+            await executeTrade(holding.ticker, 'SELL', sellShares, price,
+                `Partial Profit +9% (1/3 remaining, ${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  PARTIAL SELL ${holding.ticker}: +9% lock 33% remaining`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (sellShares * price), totalEquity - (sellShares * price));
+            totalEquity -= sellShares * price;
+            continue;
+        }
+
+        // +15% → full exit (trailing stop should usually fire before this)
+        if (returnPct >= 15 && partialSells >= 2) {
             await executeTrade(holding.ticker, 'SELL', holding.shares, price,
-                `Full Profit Exit +6% (${returnPct.toFixed(1)}%)`);
-            summaryLines.push(`  SELL ${holding.ticker}: full exit at +6%`);
+                `Full Profit Exit +15% (${returnPct.toFixed(1)}%)`);
+            summaryLines.push(`  SELL ${holding.ticker}: full exit at +15%`);
             const fresh = await getPortfolioStatus();
             await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
             totalEquity -= holding.shares * price;
@@ -292,12 +341,13 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
         }
 
         // ─── 2d. ADX Trend Death + Time Exit ───
-        // If held > 2 days, trend is dying (ADX < 15), and position is flat/red → exit
-        if (daysHeld > 2 && returnPct < 1) {
+        // Softened: require 4+ days held, actual loss (< -0.5%), and ADX < 12.
+        // The old 2-day / ADX<15 window was exiting normal consolidations.
+        if (daysHeld > 4 && returnPct < -0.5) {
             const signal = await getCachedSignal(holding.ticker);
             const adx = signal.indicators?.adx ?? 25;
 
-            if (adx < 15 || (signal.action === 'SELL' && signal.confidence >= 60)) {
+            if (adx < 12 || (signal.action === 'SELL' && signal.confidence >= 60)) {
                 await executeTrade(holding.ticker, 'SELL', holding.shares, price,
                     `Trend Exit: ADX ${adx.toFixed(0)}, ${daysHeld.toFixed(1)}d held, ${returnPct.toFixed(1)}%`);
                 summaryLines.push(`  SELL ${holding.ticker}: trend died (ADX ${adx.toFixed(0)}, ${daysHeld.toFixed(1)}d)`);
@@ -306,6 +356,29 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
                 totalEquity -= holding.shares * price;
                 continue;
             }
+        }
+
+        // ─── 2d-bis. Aging Exit (Time Decay) ───
+        // Target hold is 3-14 days. If a name is still flat after 14 days or
+        // simply hasn't worked out after 21, cycle the capital into something
+        // that is actually moving. Dead money is the silent portfolio killer.
+        if (daysHeld >= 21) {
+            await executeTrade(holding.ticker, 'SELL', holding.shares, price,
+                `Aging Exit: 21d held, ${returnPct.toFixed(1)}% return`);
+            summaryLines.push(`  SELL ${holding.ticker}: aging exit 21d (${returnPct.toFixed(1)}%)`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
+            totalEquity -= holding.shares * price;
+            continue;
+        }
+        if (daysHeld >= 14 && Math.abs(returnPct) < 2) {
+            await executeTrade(holding.ticker, 'SELL', holding.shares, price,
+                `Aging Exit: 14d flat, ${returnPct.toFixed(1)}% return`);
+            summaryLines.push(`  SELL ${holding.ticker}: aging exit 14d flat (${returnPct.toFixed(1)}%)`);
+            const fresh = await getPortfolioStatus();
+            await updatePortfolioStatus(fresh.cash_balance + (holding.shares * price), totalEquity - (holding.shares * price));
+            totalEquity -= holding.shares * price;
+            continue;
         }
 
         // ─── 2e. Full Analysis Sell Signal ───
@@ -367,12 +440,27 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
 
     // Dynamic cash floor: keep 20% of portfolio liquid (min $1000)
     const cashFloor = Math.max(1000, freshStatus.total_value * 0.20);
-    // Hard ceiling at 15. Research: 12-20 stocks cuts ~80% of idiosyncratic risk.
-    // With ~$100K and confidence-weighted sizing, 8-12 is the practical sweet spot;
-    // 15 is a hard cap for exceptional signals only.
+    // Target portfolio size = 10 positions (sweet spot for ~$100k swing book).
+    // Research: 12-20 stocks cuts ~80% of idiosyncratic risk, but with active
+    // management at ~$100k the diversification ROI flattens above 10-12.
+    // Hard ceiling at 15 for exceptional-only over-target adds.
+    const TARGET_POSITIONS = 10;
     const MAX_POSITIONS = 15;
+
+    // Cash-ratio pressure: if we're sitting on dead cash in a live strategy,
+    // relax the confidence gate a bit so we actually get invested.
+    const cashRatio = freshStatus.total_value > 0
+        ? freshStatus.cash_balance / freshStatus.total_value
+        : 1;
+    let cashPressureRelief = 0;
+    if (cashRatio > 0.85)      cashPressureRelief = 8;
+    else if (cashRatio > 0.70) cashPressureRelief = 5;
+    else if (cashRatio > 0.55) cashPressureRelief = 2;
+
     const isFirstCycleToday = updatedHoldings.length <= 1;
-    const MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
+    // Push harder on underinvested days — more shots when we have the cash.
+    let MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
+    if (cashRatio > 0.70) MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 5 : 3;
 
     const candidates = await getBuyCandidates();
     const top5 = candidates.slice(0, 5);
@@ -394,7 +482,7 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     // ─── Re-Entry Cooldown: prevent whipsaw (stop-loss → immediate re-buy) ───
     let recentlyStoppedOut = new Set<string>();
     try {
-        recentlyStoppedOut = await getRecentStopLossSells(3); // 3-day cooldown
+        recentlyStoppedOut = await getRecentStopLossSells(3); // 3-day cooldown (loss exits only)
     } catch (e) { console.error('[Engine] Failed to fetch recent stop-loss sells', e); }
 
     for (const candidate of candidates) {
@@ -408,36 +496,44 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // Skip if recently stopped out (3-day cooldown to prevent whipsaw)
+        // Skip if recently stopped out at a loss (cooldown covers real risk exits).
         if (recentlyStoppedOut.has(candidate.ticker)) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
-                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - cooldown (recently stopped out, skip)`);
+                summaryLines.push(`  ${candidate.ticker} ${candidate.confidence}% - cooldown (recent loss exit, skip)`);
             }
             continue;
         }
 
-        // Dynamic confidence gate — tuned for 8-12 position sweet spot.
-        // Below 8: base 65% lets the portfolio build up quickly.
-        // 8-9: 72% is achievable but filters out marginal setups.
-        // 10-11: 80% demands strong signals to justify incremental positions.
-        // 12+: 88% makes additional positions exceptional-only.
-        let requiredConfidence = 65;
+        // Dynamic confidence gate — biased to TARGET_POSITIONS=10.
+        //   0-2   : 58   aggressive build when empty, a little risk sprinkled in
+        //   3-5   : 62   filling toward target
+        //   6-8   : 65   approaching ideal
+        //   9     : 68   one away from target
+        //   10    : 72   at target — incremental adds need real edge
+        //   11-12 : 80   over target — strong signal required
+        //   13-14 : 88   exceptional only
         const currentCount = updatedHoldings.length + buyCount;
-        if (currentCount >= 12) requiredConfidence = 88;
-        else if (currentCount >= 10) requiredConfidence = 80;
-        else if (currentCount >= 8) requiredConfidence = 72;
+        let requiredConfidence: number;
+        if (currentCount <= 2)       requiredConfidence = 58;
+        else if (currentCount <= 5)  requiredConfidence = 62;
+        else if (currentCount <= 8)  requiredConfidence = 65;
+        else if (currentCount === 9) requiredConfidence = 68;
+        else if (currentCount === 10) requiredConfidence = 72;
+        else if (currentCount <= 12) requiredConfidence = 80;
+        else                         requiredConfidence = 88;
 
-        // Slightly riskier than before, but weighted by sentiment-quality (confidence already
-        // includes technical/fundamental points; sentimentBoost is an extra quality factor).
-        const riskierDelta = 2; // "play slightly riskier"
-        const sentimentGateWeight = 0.35; // avoid over-weighting sentiment twice
+        // Sentiment-quality weighting so strong news/analyst context adds lift.
+        const sentimentGateWeight = 0.35;
         const effectiveConfidence = candidate.confidence + (candidate.sentimentBoost ?? 0) * sentimentGateWeight;
-        const gateConfidence = Math.max(0, requiredConfidence - riskierDelta);
+        // Riskier delta + cash-pressure relief. Hard floor of 50 so we never
+        // rubber-stamp a signal — there's always some edge required.
+        const riskierDelta = 2;
+        const gateConfidence = Math.max(50, requiredConfidence - riskierDelta - cashPressureRelief);
 
         if (effectiveConfidence < gateConfidence) {
             if (top5.some(c => c.ticker === candidate.ticker)) {
                 summaryLines.push(
-                    `  ${candidate.ticker} ${candidate.confidence}% (eff ${effectiveConfidence.toFixed(1)}%) - below dynamic threshold ${gateConfidence}% (skip)`
+                    `  ${candidate.ticker} ${candidate.confidence}% (eff ${effectiveConfidence.toFixed(1)}%) - below gate ${gateConfidence}% [target ${TARGET_POSITIONS}, cash ${(cashRatio * 100).toFixed(0)}%] (skip)`
                 );
             }
             continue;
@@ -530,6 +626,8 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
  * 1. Start with a confidence-weighted target allocation.
  * 2. Cap by ATR-based risk so volatile names get smaller allocations.
  * 3. Cap by concentration and available cash.
+ * 4. Scale toward a target of ~10 positions: slight boost below target,
+ *    moderate shrink above target, hard shrink for exceptional over-adds.
  */
 export function calculatePositionSize(
     confidence: number,
@@ -540,9 +638,11 @@ export function calculatePositionSize(
     currentPositions: number
 ): number {
     const confidenceRatio = Math.max(0, Math.min(100, confidence)) / 100;
+    // Convex conviction curve: 3% at 0 confidence → 10% at 100 confidence.
     const convictionPct = 0.03 + Math.pow(confidenceRatio, 2.2) * 0.07;
     let size = totalValue * convictionPct;
 
+    // Risk-based cap: never risk more than 0.75% of the book on one stop.
     const stopDistancePct = atr > 0 && entryPrice > 0
         ? Math.max((atr * 2) / entryPrice, 0.03)
         : 0.05;
@@ -550,11 +650,17 @@ export function calculatePositionSize(
     const riskSizedCap = maxRiskBudget / stopDistancePct;
 
     size = Math.min(size, riskSizedCap);
-    size = Math.min(size, totalValue * 0.10);
-    size = Math.min(size, cashAvailable * 0.35);
+    size = Math.min(size, totalValue * 0.10);      // concentration cap
+    size = Math.min(size, cashAvailable * 0.35);   // never sink >35% of dry powder
 
-    if (currentPositions >= 8) size *= 0.9;
-    if (currentPositions >= 12) size *= 0.8;
+    // Position-count bias toward a target book of 10.
+    // - 0-5  : +5% lift so the book actually fills in reasonable time
+    // - 6-10 : unchanged (natural build-out zone)
+    // - 11-12: -15% (over-target incremental add)
+    // - 13+  : -30% (exceptional-only; prevents late over-concentration)
+    if (currentPositions <= 5)       size *= 1.05;
+    else if (currentPositions >= 13) size *= 0.70;
+    else if (currentPositions >= 11) size *= 0.85;
 
     return Math.max(0, size);
 }
@@ -587,8 +693,9 @@ async function getBuyCandidates(): Promise<TradeSignal[]> {
             });
         } catch (e) { console.error(`Failed to save analysis for ${(row as any).ticker}`, e); }
 
-        // Lower threshold: 65% (was 68%) for more buy opportunities
-        if (analysis.action === 'BUY' && analysis.confidence >= 65) {
+        // Floor matches analyzeTickerFromCandles — the engine's dynamic gate
+        // in runTradingCycle() is responsible for the final buy threshold.
+        if (analysis.action === 'BUY' && analysis.confidence >= BUY_SIGNAL_FLOOR) {
             signals.push(analysis);
         }
     }
@@ -646,6 +753,14 @@ function trimIncompleteDailyCandle(quotes: StrategyCandle[], now = new Date()): 
     return isSessionFinal ? quotes : quotes.slice(0, -1);
 }
 
+/**
+ * Minimum total buy confidence to emit a BUY signal.
+ * Lowered from 65 → 58 so the dynamic gate in runTradingCycle() can actually
+ * relax the threshold for an underinvested portfolio. The engine still gates
+ * the buy at ≥65 for a full portfolio; 58 is the true floor of tradeable edge.
+ */
+const BUY_SIGNAL_FLOOR = 58;
+
 export function analyzeTickerFromCandles(
     ticker: string,
     rawQuotes: StrategyCandle[],
@@ -654,6 +769,7 @@ export function analyzeTickerFromCandles(
         vwap?: number;
         sentimentScore?: number;
         sentimentConfidence?: number;
+        spyReturn20d?: number;
     }
 ): TradeSignal {
     const quotes = trimIncompleteDailyCandle(rawQuotes);
@@ -674,6 +790,22 @@ export function analyzeTickerFromCandles(
     const sentimentScore = context?.sentimentScore ?? 0;
     const sentimentConfidence = context?.sentimentConfidence ?? 0;
     const sentimentBoost = sentimentScore * 10 * sentimentConfidence;
+
+    // Relative strength vs SPY (20-day). Market-relative outperformance is one
+    // of the single most predictive signals in quant research, so score it
+    // explicitly instead of relying on absolute momentum alone.
+    const price20DaysAgo = closes[closes.length - 21] || closes[0];
+    const stockReturn20d = price20DaysAgo > 0
+        ? ((current.close - price20DaysAgo) / price20DaysAgo) * 100
+        : 0;
+    const spyReturn20d = context?.spyReturn20d ?? 0;
+    const relativeStrength = stockReturn20d - spyReturn20d;
+
+    // 10-day rate of change — shorter-horizon momentum complement to the 20d.
+    const price10DaysAgo = closes[closes.length - 11] || price20DaysAgo;
+    const roc10 = price10DaysAgo > 0
+        ? ((current.close - price10DaysAgo) / price10DaysAgo) * 100
+        : 0;
 
     const makeIndicators = () => ({
         rsi: ind.rsi,
@@ -701,115 +833,177 @@ export function analyzeTickerFromCandles(
     let buyConfidence = 0;
 
     if (isUptrend && priceAboveTrend) {
-        if (ind.adx >= 25) {
-            buyConfidence += 15;
+        // ─── ADX: graduated trend-strength scoring (NO hard gate) ───
+        // ADX measures trend strength, not direction. A steady grinder can be
+        // in a legitimate uptrend with ADX 15-22 and deserves partial credit.
+        if (ind.adx >= 30) {
+            buyConfidence += 18;
+            buySignals.push(`ADX ${ind.adx.toFixed(0)} (strong trend)`);
+        } else if (ind.adx >= 22) {
+            buyConfidence += 13;
             buySignals.push(`ADX ${ind.adx.toFixed(0)} (trend confirmed)`);
-        } else {
-            return {
-                ticker,
-                action: 'HOLD',
-                reason: `ADX too low (${ind.adx.toFixed(0)}) — trend not confirmed`,
-                confidence: 30,
-                indicators: makeIndicators(),
-            };
+        } else if (ind.adx >= 17) {
+            buyConfidence += 7;
+            buySignals.push(`ADX ${ind.adx.toFixed(0)} (developing trend)`);
+        } else if (ind.adx >= 12) {
+            buyConfidence += 2;
         }
 
-        if (ind.rsi < 40 && ind.rsi > 25) {
-            buyConfidence += 25;
-            buySignals.push(`RSI ${Math.round(ind.rsi)} (oversold dip buy)`);
-        } else if (ind.rsi <= 25) {
-            buyConfidence += 5;
+        // ─── RSI: wider bands so healthy-trend entries actually score points ───
+        if (ind.rsi < 25) {
+            buyConfidence += 8;
             buySignals.push(`RSI ${Math.round(ind.rsi)} (extreme oversold, caution)`);
-        } else if (ind.rsi < 50 && current.close > ind.ema10) {
-            buyConfidence += 15;
-            buySignals.push(`RSI ${Math.round(ind.rsi)} (momentum pullback)`);
+        } else if (ind.rsi < 40) {
+            buyConfidence += 22;
+            buySignals.push(`RSI ${Math.round(ind.rsi)} (oversold dip buy)`);
+        } else if (ind.rsi < 50) {
+            buyConfidence += 18;
+            buySignals.push(`RSI ${Math.round(ind.rsi)} (pullback buy)`);
         } else if (ind.rsi < 60) {
-            buyConfidence += 5;
-            buySignals.push(`RSI ${Math.round(ind.rsi)} (neutral)`);
-        } else if (ind.rsi >= 65) {
-            buyConfidence -= 10;
-            buySignals.push(`RSI ${Math.round(ind.rsi)} (overbought, risky entry)`);
+            buyConfidence += 12;
+            buySignals.push(`RSI ${Math.round(ind.rsi)} (healthy trend)`);
+        } else if (ind.rsi < 68) {
+            buyConfidence += 6;
+            buySignals.push(`RSI ${Math.round(ind.rsi)} (strong momentum)`);
+        } else if (ind.rsi < 75) {
+            // neutral — no reward, no penalty
+        } else {
+            buyConfidence -= 8;
+            buySignals.push(`RSI ${Math.round(ind.rsi)} (overbought)`);
         }
 
-        if (ind.stochRsi > 5 && ind.stochRsi < 30) {
+        // ─── StochRSI: graduated (NO hard gate) ───
+        if (ind.stochRsi <= 5) {
+            buyConfidence += 3;
+            buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (deep oversold)`);
+        } else if (ind.stochRsi < 30) {
             buyConfidence += 12;
             buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (oversold bounce)`);
-        } else if (ind.stochRsi >= 30 && ind.stochRsi < 50) {
-            buyConfidence += 5;
-            buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)}`);
-        } else if (ind.stochRsi <= 5) {
-            return {
-                ticker,
-                action: 'HOLD',
-                reason: `StochRSI ${ind.stochRsi.toFixed(0)} — falling knife, waiting for bounce`,
-                confidence: 20,
-                indicators: makeIndicators(),
-            };
+        } else if (ind.stochRsi < 50) {
+            buyConfidence += 6;
+        } else if (ind.stochRsi < 80) {
+            // neutral
+        } else {
+            buyConfidence -= 4;
+            buySignals.push(`StochRSI ${ind.stochRsi.toFixed(0)} (overbought)`);
         }
 
+        // ─── MACD ───
         if (ind.macd.histogram > 0 && ind.macd.macd > ind.macd.signal) {
             buyConfidence += 15;
             buySignals.push('MACD bullish');
         } else if (ind.macd.histogram > 0) {
-            buyConfidence += 5;
-        } else if (ind.macd.histogram < 0 && ind.macd.macd < ind.macd.signal) {
-            buyConfidence -= 12;
-            buySignals.push('MACD bearish divergence');
-        }
-
-        if (ind.volumeRatio > 1.3) {
-            buyConfidence += 12;
-            buySignals.push(`Volume +${Math.round((ind.volumeRatio - 1) * 100)}%`);
-        } else if (ind.volumeRatio > 1.1) {
-            buyConfidence += 5;
-        }
-
-        if (rvol > 1.5) {
             buyConfidence += 6;
-            buySignals.push(`RVOL ${rvol.toFixed(1)}x`);
-        } else if (rvol > 1.2) {
+            buySignals.push('MACD turning up');
+        } else if (ind.macd.histogram < 0 && ind.macd.macd < ind.macd.signal) {
+            buyConfidence -= 10;
+            buySignals.push('MACD bearish');
+        }
+
+        // ─── Volume (20-day ratio, full session) ───
+        if (ind.volumeRatio > 1.5) {
+            buyConfidence += 14;
+            buySignals.push(`Volume +${Math.round((ind.volumeRatio - 1) * 100)}% (strong)`);
+        } else if (ind.volumeRatio > 1.2) {
+            buyConfidence += 8;
+            buySignals.push(`Volume +${Math.round((ind.volumeRatio - 1) * 100)}%`);
+        } else if (ind.volumeRatio > 1.0) {
             buyConfidence += 3;
         }
 
+        // ─── RVOL (intraday relative volume) ───
+        if (rvol > 1.5) {
+            buyConfidence += 7;
+            buySignals.push(`RVOL ${rvol.toFixed(1)}x`);
+        } else if (rvol > 1.2) {
+            buyConfidence += 4;
+        }
+
+        // ─── VWAP ───
         if (priceAboveVwap) {
-            buyConfidence += 6;
+            buyConfidence += 5;
             buySignals.push('Price > VWAP');
         }
 
+        // ─── OBV (accumulation / distribution) ───
         if (ind.obvTrend > 0) {
-            buyConfidence += 5;
+            buyConfidence += 6;
             buySignals.push('OBV accumulation');
+        } else if (ind.obvTrend < 0) {
+            buyConfidence -= 3;
         }
 
+        // ─── Bollinger Band position ───
         const bbRange = ind.bollingerBands.upper - ind.bollingerBands.lower;
         if (bbRange > 0) {
             const bbPosition = (current.close - ind.bollingerBands.lower) / bbRange;
-            if (bbPosition < 0.3) {
-                buyConfidence += 8;
-                buySignals.push('Near BB lower band');
+            if (bbPosition < 0.25) {
+                buyConfidence += 10;
+                buySignals.push('Near BB lower band (mean-reversion)');
+            } else if (bbPosition < 0.5) {
+                buyConfidence += 4;
+            } else if (bbPosition > 0.95) {
+                buyConfidence -= 4;
+                buySignals.push('Upper BB (stretched)');
             }
         }
 
-        if (ind.priceChange > 5 && ind.priceChange < 15) {
-            buyConfidence += 8;
-            buySignals.push(`+${ind.priceChange.toFixed(1)}% momentum`);
-        } else if (ind.priceChange >= 15) {
+        // ─── Relative Strength vs SPY (20-day) ───
+        // Outperforming the index is a durable edge — trending leaders tend to
+        // keep leading for days-to-weeks, which matches the target hold period.
+        if (relativeStrength > 5) {
+            buyConfidence += 10;
+            buySignals.push(`RS +${relativeStrength.toFixed(1)}% vs SPY (leader)`);
+        } else if (relativeStrength > 2) {
+            buyConfidence += 6;
+            buySignals.push(`RS +${relativeStrength.toFixed(1)}% vs SPY`);
+        } else if (relativeStrength > -2) {
+            buyConfidence += 2;
+        } else if (relativeStrength < -5) {
             buyConfidence -= 5;
-            buySignals.push(`+${ind.priceChange.toFixed(1)}% (extended, late entry risk)`);
+            buySignals.push(`RS ${relativeStrength.toFixed(1)}% vs SPY (laggard)`);
+        }
+
+        // ─── 10-day Rate of Change (short-horizon momentum) ───
+        if (roc10 > 3 && roc10 < 12) {
+            buyConfidence += 8;
+            buySignals.push(`ROC10 +${roc10.toFixed(1)}%`);
+        } else if (roc10 >= 12) {
+            buyConfidence -= 4;
+            buySignals.push(`ROC10 +${roc10.toFixed(1)}% (extended)`);
+        } else if (roc10 > 0) {
+            buyConfidence += 3;
+        } else if (roc10 < -5) {
+            buyConfidence -= 5;
+            buySignals.push(`ROC10 ${roc10.toFixed(1)}% (declining)`);
+        }
+
+        // ─── 20-day price change (momentum band) ───
+        if (ind.priceChange > 5 && ind.priceChange < 15) {
+            buyConfidence += 6;
+            buySignals.push(`+${ind.priceChange.toFixed(1)}% momentum`);
+        } else if (ind.priceChange >= 15 && ind.priceChange < 25) {
+            buyConfidence += 2;
+        } else if (ind.priceChange >= 25) {
+            buyConfidence -= 6;
+            buySignals.push(`+${ind.priceChange.toFixed(1)}% (too extended)`);
         } else if (ind.priceChange > 2) {
             buyConfidence += 3;
         } else if (ind.priceChange < -5) {
-            buyConfidence -= 8;
-            buySignals.push(`${ind.priceChange.toFixed(1)}% (price declining)`);
+            buyConfidence -= 6;
         }
 
+        // ─── Sentiment ───
         if (sentimentScore > 0.2 && sentimentConfidence > 0.5) {
             const boost = Math.min(10, sentimentScore * 15);
             buyConfidence += boost;
             buySignals.push(`Positive sentiment (+${boost.toFixed(0)})`);
+        } else if (sentimentScore < -0.3 && sentimentConfidence > 0.5) {
+            buyConfidence -= 5;
+            buySignals.push('Negative sentiment');
         }
 
-        if (buyConfidence >= 65) {
+        if (buyConfidence >= BUY_SIGNAL_FLOOR) {
             return {
                 ticker,
                 action: 'BUY',
@@ -886,6 +1080,12 @@ export function analyzeTickerFromCandles(
             sellSignals.push('RVOL spike on decline');
         }
 
+        // Relative-strength laggards deserve extra sell pressure in a downtrend.
+        if (relativeStrength < -5) {
+            sellConfidence += 6;
+            sellSignals.push(`RS ${relativeStrength.toFixed(1)}% vs SPY (laggard)`);
+        }
+
         if (sellConfidence >= 60) {
             return {
                 ticker,
@@ -901,7 +1101,7 @@ export function analyzeTickerFromCandles(
     return {
         ticker,
         action: 'HOLD',
-        reason: `Neutral: RSI ${Math.round(ind.rsi)}, ADX ${ind.adx.toFixed(0)}, Trend ${isUptrend ? 'Up' : 'Down'}`,
+        reason: `Neutral: RSI ${Math.round(ind.rsi)}, ADX ${ind.adx.toFixed(0)}, Trend ${isUptrend ? 'Up' : 'Down'}, RS ${relativeStrength.toFixed(1)}%`,
         confidence: 50,
         sentimentBoost,
         indicators: makeIndicators(),
@@ -917,14 +1117,18 @@ export async function analyzeTicker(ticker: string): Promise<TradeSignal> {
     try {
         const quotes = await MarketDataService.getDailyCandles(ticker, 260);
         if (quotes.length < 200) return { ticker, action: 'HOLD', reason: 'Not enough data', confidence: 0 };
-        const hist = await getHistoricalContext(ticker);
+        const [hist, sentiment, spyReturn20d] = await Promise.all([
+            getHistoricalContext(ticker),
+            getSentimentScore(ticker),
+            getSpyReturn20d(),
+        ]);
         const vwap = hist?.vwap ?? 0;
-        const sentiment = await getSentimentScore(ticker);
         const baseSignal = analyzeTickerFromCandles(ticker, quotes, {
             rvol: hist?.rvol,
             vwap,
             sentimentScore: sentiment.score,
             sentimentConfidence: sentiment.confidence,
+            spyReturn20d,
         });
 
         if (baseSignal.action !== 'BUY') {

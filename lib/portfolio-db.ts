@@ -1065,9 +1065,10 @@ export async function getDayOpenPrices(): Promise<Map<string, number>> {
 }
 
 /**
- * Get tickers that were sold via risk exits or profit trims
- * within the last N days. Used by the trading engine to enforce a
- * re-entry cooldown and avoid whipsaw (stop → immediate re-buy).
+ * Get tickers that were sold via **loss exits** within the last N days.
+ * Only genuine risk-exits (stops and trend breakdowns) trigger the cooldown.
+ * Profit-taking trims do NOT block re-entry — if a name sets up again after
+ * a profitable exit, we want to be able to ride it a second time.
  */
 export async function getRecentStopLossSells(cooldownDays: number = 3): Promise<Set<string>> {
     const db = getTurso();
@@ -1079,15 +1080,14 @@ export async function getRecentStopLossSells(cooldownDays: number = 3): Promise<
         sql: `SELECT DISTINCT ticker FROM portfolio_transactions
               WHERE type = 'SELL' AND date >= ?
               AND (
-                notes LIKE '%Trailing Stop%' OR
                 notes LIKE '%Hard Stop%' OR
                 notes LIKE '%Gap-Down Exit%' OR
                 notes LIKE '%Trend Exit%' OR
-                -- Profit trims can still lead to immediate re-entry whipsaw on the remainder.
-                notes LIKE '%Partial Profit%' OR
-                notes LIKE '%Full Profit Exit%' OR
-                -- Gap-fill protection is also a partial trim.
-                notes LIKE '%Gap-Fill Protect%'
+                notes LIKE '%Aging Exit%' OR
+                -- Only trailing stops that triggered at a loss enforce cooldown.
+                -- Profitable trailing exits are effectively profit-taking and are excluded.
+                -- The trading engine appends "return -X.X%" to trailing-stop notes for this check.
+                (notes LIKE '%Trailing Stop%' AND notes LIKE '%return -%')
               )`,
         args: [cutoffStr],
     });
