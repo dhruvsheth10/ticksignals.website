@@ -17,7 +17,7 @@ export default function CloudStatus() {
             try {
                 const { data } = await fetchJsonWithTimeout<CloudStatus>(
                     '/api/status/cloud',
-                    { timeoutMs: 15_000, retries: 1 }
+                    { timeoutMs: 20_000, retries: 1 }
                 );
                 setStatus(data);
                 setError(null);

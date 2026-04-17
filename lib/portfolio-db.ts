@@ -170,6 +170,9 @@ export async function initPortfolioTables(): Promise<void> {
         analyzed_at TEXT DEFAULT (datetime('now'))
       )
     `);
+    // Without this index, SELECT MAX(analyzed_at) scans the whole table —
+    // with 50k+ rows it pushes /api/status/cloud past its 15s client timeout.
+    await db.execute(`CREATE INDEX IF NOT EXISTS idx_tar_analyzed_at ON trading_analysis_results(analyzed_at DESC)`);
 
     await db.execute(`
       CREATE TABLE IF NOT EXISTS trading_cycle_log (
@@ -179,6 +182,7 @@ export async function initPortfolioTables(): Promise<void> {
         summary TEXT NOT NULL
       )
     `);
+    await db.execute(`CREATE INDEX IF NOT EXISTS idx_tcl_ran_at ON trading_cycle_log(ran_at DESC)`);
 
     // Twice-daily snapshots (9:35 ET + 2:00 ET). Keep last 5 days per ticker.
     await db.execute(`
@@ -873,14 +877,33 @@ export async function getAnalysisResults(limit = 50): Promise<any[]> {
     }
 }
 
+/**
+ * "When did the cloud last do anything?" — used by the Cloud Status badge.
+ *
+ * Prefers the compact `trading_cycle_log` table (one row per cron cycle) over
+ * `trading_analysis_results` (N rows per cycle, 50k+). A MAX() over the big
+ * table without its new index takes ~25s and exceeds the client timeout.
+ * The cycle log is tiny and has an index on ran_at, so this is effectively O(1).
+ * Falls back to the analysis table only if the cycle log is empty (fresh DB).
+ */
 export async function getLastAnalysisAt(): Promise<string | null> {
+    const db = getTurso();
     try {
-        const db = getTurso();
         const r = await db.execute({
-            sql: 'SELECT MAX(analyzed_at) as last_at FROM trading_analysis_results',
+            sql: 'SELECT ran_at FROM trading_cycle_log ORDER BY ran_at DESC LIMIT 1',
             args: [],
         });
-        const last = (r.rows[0] as any)?.last_at;
+        const last = (r.rows[0] as any)?.ran_at;
+        if (last) return last;
+    } catch {
+        // Fall through to the analysis-results fallback below.
+    }
+    try {
+        const r = await db.execute({
+            sql: 'SELECT analyzed_at FROM trading_analysis_results ORDER BY analyzed_at DESC LIMIT 1',
+            args: [],
+        });
+        const last = (r.rows[0] as any)?.analyzed_at;
         return last ?? null;
     } catch {
         return null;
