@@ -305,20 +305,28 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         const currentPoint = { date: new Date().toISOString(), total_value: data.status.total_value };
 
         if (timeframe === '1D') {
-            // Show today's market-open value → current value.
-            // Find the most-recent daily history entry to use as the opening baseline.
+            // Synthesised "today only" view: anchor at today's 9:30 AM ET
+            // with the most recent daily close as the baseline, ending at
+            // the live current value. Used only when we have no intraday
+            // snapshots yet (first cycle of the day).
             const sorted = [...data.history].sort((a, b) => a.date.localeCompare(b.date));
             const lastEntry = sorted[sorted.length - 1];
             const openVal = lastEntry?.total_value ?? data.status.total_value;
 
-            // 9:30 AM ET = 13:30 UTC
-            const openTime = new Date();
-            openTime.setUTCHours(13, 30, 0, 0);
-            // If we're before market open, push open time back 24h so the line still renders
-            if (openTime > new Date()) openTime.setUTCDate(openTime.getUTCDate() - 1);
+            // 9:30 AM ET → UTC. Handles both EST (UTC-5) and EDT (UTC-4)
+            // via Intl so this survives DST transitions.
+            const now = new Date();
+            const todayEtKey = now.toLocaleDateString('sv', { timeZone: 'America/New_York' });
+            const openEt = new Date(`${todayEtKey}T09:30:00`);
+            const etOffsetMs = openEt.getTime() - new Date(
+                openEt.toLocaleString('en-US', { timeZone: 'America/New_York' })
+            ).getTime();
+            const openTime = new Date(openEt.getTime() + etOffsetMs);
+            // If we're before today's open, anchor at "now" so the chart still renders a line
+            const anchor = openTime > now ? new Date(now.getTime() - 60_000) : openTime;
 
             return [
-                { date: openTime.toISOString(), total_value: openVal },
+                { date: anchor.toISOString(), total_value: openVal },
                 currentPoint,
             ];
         }
@@ -337,6 +345,32 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         if (chartData.length < 2) return true;
         return chartData[chartData.length - 1].total_value >= chartData[0].total_value;
     }, [chartData]);
+
+    // Explicit daily ticks so Recharts never picks two samples that render the
+    // same date label (the "Tue Apr 14 × 2" bug). 1D keeps auto-ticks — those
+    // are time-of-day so duplicates aren't possible.
+    const xAxisTicks = useMemo(() => {
+        if (timeframe === '1D' || chartData.length === 0) return undefined;
+        const seen = new Map<string, string>();
+        for (const p of chartData) {
+            // ET date key so the x-axis matches the user's local market day
+            const d = new Date(p.date);
+            if (isNaN(d.getTime())) continue;
+            const key = d.toLocaleDateString('sv', { timeZone: 'America/New_York' });
+            if (!seen.has(key)) seen.set(key, p.date);
+        }
+        const dailyTicks = Array.from(seen.values());
+        if (timeframe === '1W') return dailyTicks;
+        // 30D: cap to ~8 evenly-spaced daily ticks so labels don't overlap
+        const MAX = 8;
+        if (dailyTicks.length <= MAX) return dailyTicks;
+        const step = (dailyTicks.length - 1) / (MAX - 1);
+        const picked: string[] = [];
+        for (let i = 0; i < MAX; i++) {
+            picked.push(dailyTicks[Math.round(i * step)]);
+        }
+        return picked;
+    }, [chartData, timeframe]);
 
     // Compute timeframe P&L (persistent display)
     const timeframePnL = useMemo(() => {
@@ -613,6 +647,8 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                 axisLine={false}
                                                 tickLine={false}
                                                 minTickGap={40}
+                                                ticks={xAxisTicks}
+                                                interval={xAxisTicks ? 0 : 'preserveStartEnd'}
                                             />
                                             <YAxis
                                                 domain={[

@@ -102,7 +102,9 @@ export function isMarketOpen(): boolean {
     const minute = et.getMinutes();
     if (day === 0 || day === 6) return false;
     const time = hour + minute / 60;
-    return time >= 9.5 && time < 16;
+    // Include the closing minute (16:00-16:01) so a CLOSE cron firing at
+    // exactly 4:00 PM ET isn't treated as "market already closed".
+    return time >= 9.5 && time <= 16;
 }
 
 // ══════════════════════════════════════════════════════════════════════

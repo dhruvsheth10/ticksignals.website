@@ -335,18 +335,64 @@ export async function getTransactions(limit = 50): Promise<PortfolioTransaction[
 
 export async function getHistory(days = 30): Promise<PortfolioHistory[]> {
     const db = getTurso();
-    // Fetch the most recent N rows (DESC), then re-sort oldest-first for chart ordering
-    const r = await db.execute({
-        sql: 'SELECT * FROM (SELECT * FROM portfolio_history ORDER BY date DESC LIMIT ?) ORDER BY date ASC',
-        args: [days],
-    });
-    return (r.rows as any[]).map(row => ({
-        date: row.date,
-        total_value: row.total_value,
-        cash_balance: row.cash_balance,
-        equity_value: row.equity_value,
-        day_change_pct: row.day_change_pct,
-    }));
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    // Build a day-keyed map seeded from portfolio_history (legacy / explicit EOD
+    // writes), then overlay the LAST portfolio_snapshot per ET day. Snapshots
+    // win where both exist — they're live and always written, whereas
+    // portfolio_history depends on the CLOSE cron firing cleanly every day.
+    const [histR, snapR] = await Promise.all([
+        db.execute({
+            sql: 'SELECT date, total_value, cash_balance, equity_value, day_change_pct FROM portfolio_history ORDER BY date ASC',
+            args: [],
+        }),
+        db.execute({
+            sql: `SELECT timestamp, total_value, cash_balance, equity_value
+                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+            args: [cutoff],
+        }),
+    ]);
+
+    const byDay = new Map<string, { total_value: number; cash_balance: number; equity_value: number }>();
+
+    for (const row of histR.rows as any[]) {
+        const iso = normalizeDateToISO(row.date);
+        if (!iso) continue;
+        byDay.set(iso.slice(0, 10), {
+            total_value: row.total_value,
+            cash_balance: row.cash_balance,
+            equity_value: row.equity_value,
+        });
+    }
+
+    for (const row of snapR.rows as any[]) {
+        const dayKey = etDateKey(row.timestamp);
+        byDay.set(dayKey, {
+            total_value: row.total_value,
+            cash_balance: row.cash_balance,
+            equity_value: row.equity_value,
+        });
+    }
+
+    const sortedDays = Array.from(byDay.keys()).sort();
+    const cutoffKey = cutoff.slice(0, 10);
+    const windowDays = sortedDays.filter(d => d >= cutoffKey);
+
+    const out: PortfolioHistory[] = [];
+    let prevVal: number | null = null;
+    for (const dk of windowDays) {
+        const d = byDay.get(dk)!;
+        const changePct = prevVal && prevVal > 0 ? ((d.total_value - prevVal) / prevVal) * 100 : 0;
+        out.push({
+            date: dk,
+            total_value: d.total_value,
+            cash_balance: d.cash_balance,
+            equity_value: d.equity_value,
+            day_change_pct: changePct,
+        });
+        prevVal = d.total_value;
+    }
+    return out.slice(-days);
 }
 
 export async function saveHistorySnapshot(): Promise<void> {
@@ -391,174 +437,117 @@ export async function savePortfolioSnapshot(): Promise<void> {
 
 /**
  * Get detailed portfolio history with variable granularity based on timeframe.
- *   - 1D:   all snapshots from the last 24h (every cycle = ~20min intervals)
- *   - 1W:   snapshots sampled roughly every hour for 7 days
- *   - 30D:  one point per calendar day for the last 30 days (fills gaps with last known value)
- *   - ALL:  one point per calendar day from Jan 1 2026 to today (fills gaps with last known value)
+ * All timeframes are now derived directly from portfolio_snapshots (the live,
+ * high-frequency table written every trading cycle). portfolio_history is
+ * treated as a backfill source for days that predate the snapshot table.
+ *
+ *   - 1D:   snapshots from today's ET date (00:00 ET → now). If today has no
+ *           data yet (pre-market / weekend), fall back to the most recent
+ *           ET date that has snapshots.
+ *   - 1W:   snapshots from the last 7 days downsampled to ~1/hour.
+ *   - 30D:  last snapshot per ET day for the last 30 days. Today's live
+ *           current value is appended so the chart stays up to date.
+ *   - ALL:  last snapshot per ET day from Jan 1 2026 onward, merged with
+ *           portfolio_history rows for days before snapshot coverage began.
  */
-export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL'): Promise<PortfolioSnapshot[]> {
-    const db = getTurso();
-    const now = new Date();
+const ET_TZ = 'America/New_York';
 
-    if (timeframe === '1D') {
-        // Last 24h — return all snapshots
-        const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-        const r = await db.execute({
-            sql: `SELECT timestamp, total_value, cash_balance, equity_value
-                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
-            args: [cutoff]
-        });
-        return (r.rows as any[]).map(row => ({
-            timestamp: row.timestamp,
-            total_value: row.total_value,
-            cash_balance: row.cash_balance,
-            equity_value: row.equity_value,
-        }));
-    }
+function etDateKey(ts: string | Date): string {
+    const d = typeof ts === 'string' ? new Date(ts) : ts;
+    return d.toLocaleDateString('sv', { timeZone: ET_TZ });
+}
 
-    if (timeframe === '1W') {
-        // Last 7 days — high-frequency snapshots downsampled to ~1/hour.
-        // Fill weekday gaps using portfolio_history daily EOD values when snapshots are absent.
-        const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        const cutoffStr = cutoff.toISOString();
-        const r = await db.execute({
-            sql: `SELECT timestamp, total_value, cash_balance, equity_value
-                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
-            args: [cutoffStr]
-        });
-        const snapshotRows: PortfolioSnapshot[] = (r.rows as any[]).map(row => ({
-            timestamp: row.timestamp,
-            total_value: row.total_value,
-            cash_balance: row.cash_balance,
-            equity_value: row.equity_value,
-        }));
-
-        // Build a set of days that already have snapshot coverage
-        const coveredDays = new Set(snapshotRows.map(p => p.timestamp.slice(0, 10)));
-
-        // Fetch portfolio_history for the past 7 days to fill in uncovered weekdays
-        const histR = await db.execute({
-            sql: `SELECT date, total_value, cash_balance, equity_value
-                  FROM portfolio_history WHERE date >= ? ORDER BY date ASC`,
-            args: [cutoff.toISOString().slice(0, 10)]
-        });
-        const syntheticRows: PortfolioSnapshot[] = (histR.rows as any[])
-            .filter((row: any) => {
-                const iso = normalizeDateToISO(row.date);
-                if (!iso) return false;
-                const dk = iso.slice(0, 10);
-                const d = new Date(iso);
-                const isWeekend = d.getUTCDay() === 0 || d.getUTCDay() === 6;
-                return !isWeekend && !coveredDays.has(dk);
-            })
-            .map((row: any) => {
-                const iso = normalizeDateToISO(row.date)!;
-                return {
-                    timestamp: iso.slice(0, 10) + 'T16:00:00Z',
-                    total_value: row.total_value,
-                    cash_balance: row.cash_balance,
-                    equity_value: row.equity_value,
-                };
-            });
-
-        // Merge and sort by timestamp
-        const merged = [...snapshotRows, ...syntheticRows].sort(
-            (a, b) => a.timestamp.localeCompare(b.timestamp)
-        );
-
-        // Downsample: keep at most 1 per hour
-        return downsampleByInterval(merged, 60 * 60 * 1000);
-    }
-
-    // ── 30D / ALL: daily fill-forward logic ──
-    const INITIAL_VALUE = 100000;
-    const startDate = timeframe === 'ALL'
-        ? new Date('2026-01-01T00:00:00Z')
-        : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-    // Fetch ALL portfolio_history rows (we need them all for carry-forward even on 30D)
-    const histR = await db.execute({
-        sql: `SELECT date, total_value, cash_balance, equity_value FROM portfolio_history ORDER BY date ASC`,
-        args: []
-    });
-
-    // Build a map of YYYY-MM-DD → data from portfolio_history
-    const dailyMap = new Map<string, { total_value: number; cash_balance: number; equity_value: number }>();
-    for (const row of histR.rows as any[]) {
-        const iso = normalizeDateToISO(row.date);
-        if (!iso) continue;
-        const dayKey = iso.slice(0, 10);
-        dailyMap.set(dayKey, {
-            total_value: row.total_value,
-            cash_balance: row.cash_balance,
-            equity_value: row.equity_value,
-        });
-    }
-
-    // Fill every calendar day from startDate to today, carrying forward the last known value
-    const result: PortfolioSnapshot[] = [];
-    const todayStr = now.toISOString().slice(0, 10);
-    let lastKnown = { total_value: INITIAL_VALUE, cash_balance: INITIAL_VALUE, equity_value: 0 };
-
-    // Pre-seed lastKnown with any data before the start date (for carry-forward)
-    const sortedDays = Array.from(dailyMap.keys()).sort();
-    for (const dk of sortedDays) {
-        if (dk < startDate.toISOString().slice(0, 10)) {
-            lastKnown = dailyMap.get(dk)!;
-        }
-    }
-
-    const cursor = new Date(startDate);
-    cursor.setUTCHours(16, 0, 0, 0); // 4pm UTC (~market close)
-    while (cursor.toISOString().slice(0, 10) <= todayStr) {
-        const dayKey = cursor.toISOString().slice(0, 10);
-        const isWeekend = cursor.getUTCDay() === 0 || cursor.getUTCDay() === 6; // Sun=0, Sat=6
-        const entry = dailyMap.get(dayKey);
-        if (entry) {
-            lastKnown = entry;
-        }
-        // Skip weekends and today (today's live data appended below)
-        if (!isWeekend && dayKey !== todayStr) {
-            result.push({
-                timestamp: cursor.toISOString(),
-                total_value: lastKnown.total_value,
-                cash_balance: lastKnown.cash_balance,
-                equity_value: lastKnown.equity_value,
-            });
-        }
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-    }
-
-    // Append today's live snapshots (sampled every 4 hours for 30D, every 2 hours for ALL)
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const todayR = await db.execute({
-        sql: `SELECT timestamp, total_value, cash_balance, equity_value
-              FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
-        args: [todayStart.toISOString()]
-    });
-    const todaySnapshots: PortfolioSnapshot[] = (todayR.rows as any[]).map(row => ({
+function rowsToSnapshots(rows: any[]): PortfolioSnapshot[] {
+    return rows.map(row => ({
         timestamp: row.timestamp,
         total_value: row.total_value,
         cash_balance: row.cash_balance,
         equity_value: row.equity_value,
     }));
-    const sampleInterval = timeframe === 'ALL' ? 8 * 60 * 60 * 1000 : 4 * 60 * 60 * 1000;
-    const todaySampled = downsampleByInterval(todaySnapshots, sampleInterval);
+}
 
-    // If no live snapshots, add one point for today from last known
-    if (todaySampled.length === 0) {
-        result.push({
-            timestamp: new Date(todayStr + 'T16:00:00Z').toISOString(),
-            total_value: lastKnown.total_value,
-            cash_balance: lastKnown.cash_balance,
-            equity_value: lastKnown.equity_value,
+export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL'): Promise<PortfolioSnapshot[]> {
+    const db = getTurso();
+    const now = new Date();
+
+    if (timeframe === '1D') {
+        // Pull last 72h of snapshots (enough to cover a weekend). Filter to today's
+        // ET date. If that's empty (weekend / very early pre-market), fall back to
+        // the most recent ET date that has any data.
+        const windowStart = new Date(now.getTime() - 72 * 60 * 60 * 1000).toISOString();
+        const r = await db.execute({
+            sql: `SELECT timestamp, total_value, cash_balance, equity_value
+                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+            args: [windowStart]
         });
-    } else {
-        result.push(...todaySampled);
+        const all = rowsToSnapshots(r.rows as any[]);
+        if (all.length === 0) return [];
+
+        const todayKey = etDateKey(now);
+        const today = all.filter(s => etDateKey(s.timestamp) === todayKey);
+        if (today.length >= 2) return smoothIsolatedPortfolioValueSpikes(today);
+
+        // Fallback: most recent ET date in the window
+        const latestKey = etDateKey(all[all.length - 1].timestamp);
+        const session = all.filter(s => etDateKey(s.timestamp) === latestKey);
+        return smoothIsolatedPortfolioValueSpikes(session);
     }
 
-    return smoothIsolatedPortfolioValueSpikes(result);
+    if (timeframe === '1W') {
+        const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const r = await db.execute({
+            sql: `SELECT timestamp, total_value, cash_balance, equity_value
+                  FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+            args: [cutoff]
+        });
+        const snaps = rowsToSnapshots(r.rows as any[]);
+        return smoothIsolatedPortfolioValueSpikes(downsampleByInterval(snaps, 60 * 60 * 1000));
+    }
+
+    // ── 30D / ALL: one point per ET day, sourced primarily from portfolio_snapshots ──
+    const startDate = timeframe === 'ALL'
+        ? new Date('2026-01-01T00:00:00Z')
+        : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const snapR = await db.execute({
+        sql: `SELECT timestamp, total_value, cash_balance, equity_value
+              FROM portfolio_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC`,
+        args: [startDate.toISOString()]
+    });
+    const snaps = rowsToSnapshots(snapR.rows as any[]);
+
+    // Keep the LAST snapshot per ET date — that's the effective EOD value
+    // (or most recent intraday value for today in progress).
+    const lastPerDay = new Map<string, PortfolioSnapshot>();
+    for (const s of snaps) {
+        lastPerDay.set(etDateKey(s.timestamp), s);
+    }
+
+    // For ALL: backfill days that predate snapshot coverage using portfolio_history
+    if (timeframe === 'ALL') {
+        const histR = await db.execute({
+            sql: `SELECT date, total_value, cash_balance, equity_value
+                  FROM portfolio_history ORDER BY date ASC`,
+            args: []
+        });
+        for (const row of histR.rows as any[]) {
+            const iso = normalizeDateToISO(row.date);
+            if (!iso) continue;
+            const dayKey = iso.slice(0, 10);
+            if (lastPerDay.has(dayKey)) continue; // prefer live snapshot data
+            lastPerDay.set(dayKey, {
+                timestamp: dayKey + 'T20:00:00Z',
+                total_value: row.total_value,
+                cash_balance: row.cash_balance,
+                equity_value: row.equity_value,
+            });
+        }
+    }
+
+    const points = Array.from(lastPerDay.values()).sort(
+        (a, b) => a.timestamp.localeCompare(b.timestamp)
+    );
+    return smoothIsolatedPortfolioValueSpikes(points);
 }
 
 /**
@@ -611,18 +600,19 @@ function normalizeDateToISO(dateStr: string): string | null {
     }
 
     // Dash-separated: YYYY-MM-DD (standard) or possibly YYYY-DD-MM (old bug)
+    // Zero-pad month/day so legacy rows like "2026-2-20" still parse.
     if (dateStr.includes('-')) {
         const parts = dateStr.split('-');
         if (parts.length === 3) {
-            let [a, b, c] = parts;
-            // Standard YYYY-MM-DD
-            let iso = `${a}-${b}-${c}T16:00:00Z`;
+            const [a, b, c] = parts;
+            const bp = b.padStart(2, '0');
+            const cp = c.padStart(2, '0');
+            let iso = `${a}-${bp}-${cp}T16:00:00Z`;
             let date = new Date(iso);
             if (!isNaN(date.getTime()) && date.getFullYear() > 2000) {
                 return date.toISOString();
             }
-            // Try YYYY-DD-MM (swapped month/day from old bug)
-            iso = `${a}-${c}-${b}T16:00:00Z`;
+            iso = `${a}-${cp}-${bp}T16:00:00Z`;
             date = new Date(iso);
             if (!isNaN(date.getTime()) && date.getFullYear() > 2000) {
                 return date.toISOString();

@@ -32,7 +32,12 @@ export default async function handler(
         await initPortfolioTables();
         await warmNeon().catch((e) => console.warn('[Cron] Neon warm-up failed:', e));
 
-        if (!isMarketOpen() && type !== 'OPEN') {
+        // OPEN and CLOSE are edge-of-session cycles and MUST run even when
+        // isMarketOpen() is false (OPEN fires 1 min before the bell, CLOSE
+        // fires at 16:00 ET which the strict `< 16` check would reject).
+        // Only MID and PORTFOLIO_CHECK need the market to actually be open.
+        const isEdgeCycle = type === 'OPEN' || type === 'CLOSE';
+        if (!isMarketOpen() && !isEdgeCycle) {
             console.log('Market Closed. Skipping trade cycle.');
             return res.status(200).json({ status: 'Market Closed', skipped: true });
         }
