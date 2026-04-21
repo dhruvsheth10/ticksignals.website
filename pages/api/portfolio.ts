@@ -10,7 +10,7 @@ export default async function handler(
     try {
         await initPortfolioTables();
 
-        const [status, holdings, transactionsRaw, history, screenerData, detail1D, detail1W, detail30D, dayOpens] = await Promise.all([
+        const [status, holdings, transactionsRaw, history, screenerData, detail1D, detail1W, detail30D, detailMax, dayOpens] = await Promise.all([
             getPortfolioStatus(),
             getHoldings(),
             getTransactions(50),
@@ -19,6 +19,7 @@ export default async function handler(
             getDetailedHistory('1D'),
             getDetailedHistory('1W'),
             getDetailedHistory('30D'),
+            getDetailedHistory('ALL'),
             getDayOpenPrices(),
         ]);
 
@@ -48,6 +49,7 @@ export default async function handler(
                 '1D': detail1D,
                 '1W': detail1W,
                 '30D': detail30D,
+                'MAX': detailMax,
             },
         });
     } catch (error: any) {

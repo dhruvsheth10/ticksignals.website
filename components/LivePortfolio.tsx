@@ -42,11 +42,12 @@ interface PortfolioData {
         '1D': { timestamp: string; total_value: number }[];
         '1W': { timestamp: string; total_value: number }[];
         '30D': { timestamp: string; total_value: number }[];
+        'MAX': { timestamp: string; total_value: number }[];
     };
 }
 
 interface LivePortfolioProps {
-    initialTimeframe?: '1D' | '1W' | '30D';
+    initialTimeframe?: '1D' | '1W' | '30D' | 'MAX';
 }
 
 type ReturnMode = 'total_pct' | 'day_pct' | 'total_dollar';
@@ -104,7 +105,7 @@ function interpolatePortfolioAtClientX(
     return { value, dateStr: new Date(timeMs).toISOString() };
 }
 
-function formatPortfolioTooltipLabel(dateStr: string, timeframe: '1D' | '1W' | '30D'): string {
+function formatPortfolioTooltipLabel(dateStr: string, timeframe: '1D' | '1W' | '30D' | 'MAX'): string {
     const d = parseDate(dateStr);
     if (isNaN(d.getTime())) return String(dateStr);
     if (timeframe === '1D') return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -117,7 +118,7 @@ type PortfolioTooltipContentProps = {
     payload?: { value?: number; dataKey?: unknown }[];
     label?: string | number;
     fluid: { value: number; dateStr: string } | null;
-    timeframe: '1D' | '1W' | '30D';
+    timeframe: '1D' | '1W' | '30D' | 'MAX';
     lineColor: string;
 };
 
@@ -203,7 +204,7 @@ function computeSellReturn(
 const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => {
     const [data, setData] = useState<PortfolioData | null>(null);
     const [loading, setLoading] = useState(true);
-    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D'>(initialTimeframe);
+    const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D' | 'MAX'>(initialTimeframe);
     const [returnMode, setReturnMode] = useState<ReturnMode>('total_pct');
     const [showAdminLogs, setShowAdminLogs] = useState(false);
     const [adminPassword, setAdminPassword] = useState('');
@@ -273,7 +274,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     }, [fetchPortfolio]);
 
     // Smooth transition on timeframe change
-    const handleTimeframeChange = useCallback((tf: '1D' | '1W' | '30D') => {
+    const handleTimeframeChange = useCallback((tf: '1D' | '1W' | '30D' | 'MAX') => {
         if (tf === timeframe) return;
         setChartVisible(false);
         setSelectionInfo(null);
@@ -336,7 +337,11 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
             return pts.length >= 2 ? pts : [...pts, currentPoint];
         }
 
-        // 30D
+        if (timeframe === '30D') {
+            return data.history.map(h => ({ date: h.date, total_value: h.total_value }));
+        }
+
+        // MAX
         return data.history.map(h => ({ date: h.date, total_value: h.total_value }));
     }, [data, timeframe]);
 
@@ -552,13 +557,19 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                             {timeframePnL.changePct >= 0 ? '+' : ''}{timeframePnL.changePct.toFixed(3)}%
                                         </span>
                                         <span className="text-xs text-gray-500 ml-1">
-                                            {timeframe === '1D' ? 'Today' : timeframe === '1W' ? 'Past 7 Days' : 'Past 30 Days'}
+                                            {timeframe === '1D'
+                                                ? 'Today'
+                                                : timeframe === '1W'
+                                                    ? 'Past 7 Days'
+                                                    : timeframe === '30D'
+                                                        ? 'Past 30 Days'
+                                                        : 'Since inception'}
                                         </span>
                                     </div>
                                 )}
                             </div>
                             <div className="flex gap-2 bg-gray-900/50 p-1 rounded-lg">
-                                {(['1D', '1W', '30D'] as const).map(tf => (
+                                {(['1D', '1W', '30D', 'MAX'] as const).map(tf => (
                                     <button
                                         key={tf}
                                         onClick={() => handleTimeframeChange(tf)}
@@ -640,6 +651,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                                     if (isNaN(d.getTime())) return '';
                                                     if (timeframe === '1D') return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
                                                     if (timeframe === '1W') return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+                                                    if (timeframe === 'MAX') return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' });
                                                     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
                                                 }}
                                                 stroke="#374151"
