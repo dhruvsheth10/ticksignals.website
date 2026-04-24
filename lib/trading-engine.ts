@@ -440,14 +440,14 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     const freshStatus = await getPortfolioStatus();
     const updatedHoldings = await getHoldings();
 
-    // Dynamic cash floor: keep 20% of portfolio liquid (min $1000)
-    const cashFloor = Math.max(1000, freshStatus.total_value * 0.20);
-    // Target portfolio size = 10 positions (sweet spot for ~$100k swing book).
-    // Research: 12-20 stocks cuts ~80% of idiosyncratic risk, but with active
-    // management at ~$100k the diversification ROI flattens above 10-12.
-    // Hard ceiling at 15 for exceptional-only over-target adds.
-    const TARGET_POSITIONS = 10;
-    const MAX_POSITIONS = 15;
+    // Dynamic cash floor: run the book hotter by default (keep only ~8% liquid).
+    // This intentionally raises utilization while still leaving a small reserve
+    // for adverse moves / opportunistic adds.
+    const cashFloor = Math.max(1000, freshStatus.total_value * 0.08);
+    // More concentrated book so each winning thesis can matter.
+    // Target 8 names, hard ceiling 12 (exceptional-only adds above target).
+    const TARGET_POSITIONS = 8;
+    const MAX_POSITIONS = 12;
 
     // Cash-ratio pressure: if we're sitting on dead cash in a live strategy,
     // relax the confidence gate a bit so we actually get invested.
@@ -460,9 +460,10 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
     else if (cashRatio > 0.55) cashPressureRelief = 2;
 
     const isFirstCycleToday = updatedHoldings.length <= 1;
-    // Push harder on underinvested days — more shots when we have the cash.
-    let MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
-    if (cashRatio > 0.70) MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 5 : 3;
+    // Keep a paced entry cadence; we're increasing size per trade, so we don't
+    // also want too many simultaneous adds in one pass.
+    let MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 3 : 2;
+    if (cashRatio > 0.70) MAX_BUYS_PER_CYCLE = isFirstCycleToday ? 4 : 2;
 
     const candidates = await getBuyCandidates();
     const top5 = candidates.slice(0, 5);
@@ -506,22 +507,15 @@ export async function runTradingCycle(type: 'OPEN' | 'MID' | 'CLOSE' | 'PORTFOLI
             continue;
         }
 
-        // Dynamic confidence gate — biased to TARGET_POSITIONS=10.
-        //   0-2   : 58   aggressive build when empty, a little risk sprinkled in
-        //   3-5   : 62   filling toward target
-        //   6-8   : 65   approaching ideal
-        //   9     : 68   one away from target
-        //   10    : 72   at target — incremental adds need real edge
-        //   11-12 : 80   over target — strong signal required
-        //   13-14 : 88   exceptional only
+        // Dynamic confidence gate — biased to TARGET_POSITIONS=8.
+        // Build quickly when underinvested, then tighten sharply near/above target.
         const currentCount = updatedHoldings.length + buyCount;
         let requiredConfidence: number;
-        if (currentCount <= 2)       requiredConfidence = 58;
-        else if (currentCount <= 5)  requiredConfidence = 62;
-        else if (currentCount <= 8)  requiredConfidence = 65;
-        else if (currentCount === 9) requiredConfidence = 68;
-        else if (currentCount === 10) requiredConfidence = 72;
-        else if (currentCount <= 12) requiredConfidence = 80;
+        if (currentCount <= 2)       requiredConfidence = 60;
+        else if (currentCount <= 4)  requiredConfidence = 64;
+        else if (currentCount <= 6)  requiredConfidence = 68;
+        else if (currentCount <= 8)  requiredConfidence = 72;
+        else if (currentCount <= 10) requiredConfidence = 82;
         else                         requiredConfidence = 88;
 
         // Sentiment-quality weighting so strong news/analyst context adds lift.
@@ -640,29 +634,60 @@ export function calculatePositionSize(
     currentPositions: number
 ): number {
     const confidenceRatio = Math.max(0, Math.min(100, confidence)) / 100;
-    // Convex conviction curve: 3% at 0 confidence → 10% at 100 confidence.
-    const convictionPct = 0.03 + Math.pow(confidenceRatio, 2.2) * 0.07;
+    // Conviction buckets: only the strongest signals should command very large
+    // notional size (20-30% book-level exposure on top-tier setups).
+    const convictionPct =
+        confidence >= 90 ? 0.26 :
+            confidence >= 85 ? 0.22 :
+                confidence >= 80 ? 0.18 :
+                    confidence >= 74 ? 0.13 :
+                        confidence >= 68 ? 0.09 : 0.06;
     let size = totalValue * convictionPct;
+    // Gentle curve inside each band so confidence still matters continuously.
+    size *= 0.9 + confidenceRatio * 0.2;
 
-    // Risk-based cap: never risk more than 0.75% of the book on one stop.
+    // Risk-based cap: increase allowable per-trade risk for high-conviction
+    // setups, but still force every position through ATR/stop scrutiny.
     const stopDistancePct = atr > 0 && entryPrice > 0
         ? Math.max((atr * 2) / entryPrice, 0.03)
         : 0.05;
-    const maxRiskBudget = totalValue * 0.0075;
+    const maxRiskBudgetPct =
+        confidence >= 90 ? 0.022 :
+            confidence >= 85 ? 0.018 :
+                confidence >= 78 ? 0.014 :
+                    confidence >= 70 ? 0.011 : 0.009;
+    const maxRiskBudget = totalValue * maxRiskBudgetPct;
     const riskSizedCap = maxRiskBudget / stopDistancePct;
 
     size = Math.min(size, riskSizedCap);
-    size = Math.min(size, totalValue * 0.10);      // concentration cap
-    size = Math.min(size, cashAvailable * 0.35);   // never sink >35% of dry powder
+    // Concentration cap by conviction: only A+ setups can hit 20-30k on 100k books.
+    const concentrationCapPct =
+        confidence >= 90 ? 0.30 :
+            confidence >= 85 ? 0.26 :
+                confidence >= 80 ? 0.22 :
+                    confidence >= 74 ? 0.17 : 0.12;
+    size = Math.min(size, totalValue * concentrationCapPct);
+    // Dry-powder cap by conviction; strongest setups can deploy a majority of
+    // available cash, weaker ones cannot.
+    const cashDeployCapPct =
+        confidence >= 90 ? 0.70 :
+            confidence >= 85 ? 0.60 :
+                confidence >= 80 ? 0.50 :
+                    confidence >= 74 ? 0.42 : 0.30;
+    size = Math.min(size, cashAvailable * cashDeployCapPct);
 
-    // Position-count bias toward a target book of 10.
-    // - 0-5  : +5% lift so the book actually fills in reasonable time
-    // - 6-10 : unchanged (natural build-out zone)
-    // - 11-12: -15% (over-target incremental add)
-    // - 13+  : -30% (exceptional-only; prevents late over-concentration)
-    if (currentPositions <= 5)       size *= 1.05;
-    else if (currentPositions >= 13) size *= 0.70;
-    else if (currentPositions >= 11) size *= 0.85;
+    // Position-count bias toward a target book of 8.
+    if (currentPositions <= 3)       size *= 1.20;
+    else if (currentPositions <= 5)  size *= 1.10;
+    else if (currentPositions >= 11) size *= 0.65;
+    else if (currentPositions >= 9)  size *= 0.80;
+
+    // Floor for very high conviction so elite signals don't get clipped into
+    // tiny tickets by minor constraints.
+    if (confidence >= 85) {
+        const highConvictionFloor = Math.min(totalValue * 0.12, cashAvailable * 0.35);
+        size = Math.max(size, highConvictionFloor);
+    }
 
     return Math.max(0, size);
 }
