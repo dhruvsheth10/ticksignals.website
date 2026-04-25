@@ -69,7 +69,6 @@
     opacity: 1;
   }
 }
-
 @keyframes fadeInOut {
   0% {
     opacity: 0;
