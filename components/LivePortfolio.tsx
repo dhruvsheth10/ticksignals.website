@@ -207,7 +207,6 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     const [timeframe, setTimeframe] = useState<'1D' | '1W' | '30D' | 'MAX'>(initialTimeframe);
     const [returnMode, setReturnMode] = useState<ReturnMode>('total_pct');
     const [showAdminLogs, setShowAdminLogs] = useState(false);
-    const [adminPassword, setAdminPassword] = useState('');
     const [adminLoading, setAdminLoading] = useState(false);
     const [adminError, setAdminError] = useState<string | null>(null);
     const [adminLogs, setAdminLogs] = useState<{
@@ -237,6 +236,34 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
     const [chartFluidHover, setChartFluidHover] = useState<{ value: number; dateStr: string } | null>(null);
 
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
+
+    const handleShowLogs = async () => {
+        setShowAdminLogs(true);
+        if (adminLogs) return; // already loaded
+        setAdminLoading(true);
+        setAdminError(null);
+        try {
+            const res = await fetch('/api/admin/trade-logs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ limit: 100 }),
+            });
+            const json = await res.json();
+            if (!res.ok || !json.ok) {
+                throw new Error(json.error || 'Failed to load logs');
+            }
+            setAdminLogs({
+                trades: json.trades || [],
+                analysis: json.analysis || [],
+                cycleLogs: json.cycleLogs || [],
+                dailyPnL: json.dailyPnL || [],
+            });
+        } catch (err: any) {
+            setAdminError(err.message || 'Failed to load logs');
+        } finally {
+            setAdminLoading(false);
+        }
+    };
 
     const fetchPortfolio = useCallback(async (silent = false) => {
         try {
@@ -896,7 +923,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
 
                 {/* Admin Logs Modal */}
                 {showAdminLogs && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { setShowAdminLogs(false); setAdminLogs(null); setAdminPassword(''); setAdminError(null); }}>
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { setShowAdminLogs(false); setAdminLogs(null); setAdminError(null); }}>
                         <div className="w-full max-w-6xl rounded-xl bg-gray-900 border border-gray-700 shadow-2xl max-h-[92vh] flex flex-col mx-4" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-between border-b border-gray-700 px-5 py-3.5">
                                 <h2 className="text-sm font-semibold text-white flex items-center gap-2">
@@ -905,63 +932,18 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                 </h2>
                                 <button
                                     type="button"
-                                    onClick={() => { setShowAdminLogs(false); setAdminLogs(null); setAdminPassword(''); setAdminError(null); }}
+                                    onClick={() => { setShowAdminLogs(false); setAdminLogs(null); setAdminError(null); }}
                                     className="text-gray-400 hover:text-white text-sm"
                                 >
                                     Close
                                 </button>
                             </div>
 
-                            {!adminLogs && (
-                                <div className="p-4 border-b border-gray-800">
-                                    <p className="text-xs text-gray-400 mb-2">Enter admin password</p>
-                                    <form
-                                        className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center"
-                                        onSubmit={async (e) => {
-                                            e.preventDefault();
-                                            setAdminLoading(true);
-                                            setAdminError(null);
-                                            try {
-                                                const res = await fetch('/api/admin/trade-logs', {
-                                                    method: 'POST',
-                                                    headers: { 'Content-Type': 'application/json' },
-                                                    body: JSON.stringify({ password: adminPassword, limit: 100 }),
-                                                });
-                                                const json = await res.json();
-                                                if (!res.ok || !json.ok) {
-                                                    throw new Error(json.error || 'Failed to load logs');
-                                                }
-                                                setAdminLogs({
-                                                    trades: json.trades || [],
-                                                    analysis: json.analysis || [],
-                                                    cycleLogs: json.cycleLogs || [],
-                                                    dailyPnL: json.dailyPnL || [],
-                                                });
-                                            } catch (err: any) {
-                                                setAdminError(err.message || 'Failed to load logs');
-                                            } finally {
-                                                setAdminLoading(false);
-                                                setAdminPassword('');
-                                            }
-                                        }}
-                                    >
-                                        <input
-                                            type="password"
-                                            className="flex-1 rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-aquamarine-400"
-                                            placeholder="Admin password"
-                                            value={adminPassword}
-                                            onChange={(e) => setAdminPassword(e.target.value)}
-                                        />
-                                        <button
-                                            type="submit"
-                                            disabled={adminLoading || !adminPassword}
-                                            className="rounded-md bg-aquamarine-500 px-3 py-1.5 text-xs font-semibold text-black disabled:opacity-60"
-                                        >
-                                            {adminLoading ? 'Checking…' : 'View logs'}
-                                        </button>
-                                    </form>
-                                    {adminError && <p className="mt-2 text-xs text-red-400">{adminError}</p>}
-                                </div>
+                            {!adminLogs && adminLoading && (
+                                <div className="p-8 text-center text-gray-400">Loading logs...</div>
+                            )}
+                            {!adminLogs && !adminLoading && adminError && (
+                                <div className="p-8 text-center text-red-400">{adminError}</div>
                             )}
 
                             {adminLogs && (
@@ -969,10 +951,7 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
                                     <div className="flex justify-between items-center">
                                         <h3 className="font-semibold text-white">Trading Logic Logs</h3>
                                         <button
-                                            onClick={() => {
-                                                const form = document.querySelector('form');
-                                                if (form) form.requestSubmit();
-                                            }}
+                                            onClick={handleShowLogs}
                                             className="text-xs text-aquamarine-400 hover:text-aquamarine-300 flex items-center gap-1"
                                         >
                                             <RefreshCw size={12} /> Refresh

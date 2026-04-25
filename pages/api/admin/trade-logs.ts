@@ -26,21 +26,12 @@ export default async function handler(
     req: NextApiRequest,
     res: NextApiResponse<TradeLogResponse>
 ) {
-    if (req.method !== 'POST') {
+    if (req.method !== 'POST' && req.method !== 'GET') {
         return res.status(405).json({ ok: false, error: 'Method not allowed' });
     }
 
     try {
-        const { password, limit = 50 } = req.body || {};
-
-        if (!password) {
-            return res.status(401).json({ ok: false, error: 'Password required' });
-        }
-
-        const hash = crypto.createHash('sha256').update(password).digest('hex');
-        if (hash !== ADMIN_PASSWORD_HASH) {
-            return res.status(401).json({ ok: false, error: 'Invalid password' });
-        }
+        const { limit = 50 } = req.body || req.query || {};
 
         const max = Math.min(Number(limit) || 50, 200);
 

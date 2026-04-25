@@ -114,8 +114,6 @@ interface StockScreenerProps {
 export default function StockScreener({ onTickerClick }: StockScreenerProps) {
     const [stocks, setStocks] = useState<StockData[]>([]);
     const [loading, setLoading] = useState(true);
-    const [scanning, setScanning] = useState(false);
-    const [scanResult, setScanResult] = useState<string>('');
     const [lastUpdated, setLastUpdated] = useState<string | null>(null);
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [filters, setFilters] = useState<FilterConfig>(EMPTY_FILTERS);
@@ -172,52 +170,6 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
             setLastUpdated(null);
         } finally {
             setLoading(false);
-        }
-    };
-
-    const runScreener = async () => {
-        const password = window.prompt("Enter admin password to run scan:");
-        if (password === null) return; // User cancelled
-
-        setScanning(true);
-        setScanResult('Initializing...');
-        try {
-            const { response, data } = await fetchJsonWithTimeout<{
-                success?: boolean;
-                processed?: number;
-                durationSeconds?: string;
-                details?: string;
-                error?: string;
-            }>('/api/screener', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password }),
-                timeoutMs: 600_000,
-                retries: 0,
-            });
-
-            if (response.ok && data.success) {
-                setScanResult(`✓ ${data.processed} stocks scanned in ${data.durationSeconds}s`);
-                await fetchData();
-            } else {
-                const errorMsg = data.details || data.error || 'Scan failed';
-                setScanResult(`Error: ${errorMsg}`);
-                console.error('Scan failed:', data);
-            }
-        } catch (error: unknown) {
-            const aborted =
-                typeof error === 'object' &&
-                error !== null &&
-                'name' in error &&
-                (error as { name: string }).name === 'AbortError';
-            setScanResult(
-                aborted
-                    ? 'Error: Request timed out (scan can take a while — try again or use another browser profile if this persists).'
-                    : `Error: ${error instanceof Error ? error.message : String(error)}`
-            );
-            console.error('Scan error:', error);
-        } finally {
-            setScanning(false);
         }
     };
 
@@ -466,26 +418,8 @@ export default function StockScreener({ onTickerClick }: StockScreenerProps) {
                         >
                             <Download size={14} />
                         </button>
-
-                        <button
-                            onClick={runScreener}
-                            disabled={scanning}
-                            className="flex items-center gap-1.5 px-4 py-2 bg-aquamarine-600 text-white font-medium rounded-lg hover:bg-aquamarine-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm"
-                        >
-                            <RefreshCw size={14} className={scanning ? 'animate-spin' : ''} />
-                            {scanning ? 'Scanning...' : 'Run Scan'}
-                        </button>
                     </div>
                 </div>
-
-                {scanResult && (
-                    <div className={`mt-3 text-sm px-3 py-2 rounded-lg ${scanResult.startsWith('Error')
-                        ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                        : 'bg-green-500/10 text-green-400 border border-green-500/20'
-                        }`}>
-                        {scanResult}
-                    </div>
-                )}
             </div>
 
             {/* Filter Panel */}
