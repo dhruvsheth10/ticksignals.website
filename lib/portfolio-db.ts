@@ -3,6 +3,8 @@
  * Neon holds only screener_cache; everything else lives here.
  */
 import { getTurso } from './turso';
+import { getPreviousUsTradingSessionEtYmd } from './trading-session';
+import { portfolioHistoryDayKey } from './portfolio-history-dates';
 
 // ── Interfaces ──
 export interface PortfolioStatus {
@@ -356,9 +358,9 @@ export async function getHistory(days = 30): Promise<PortfolioHistory[]> {
     const byDay = new Map<string, { total_value: number; cash_balance: number; equity_value: number }>();
 
     for (const row of histR.rows as any[]) {
-        const iso = normalizeDateToISO(row.date);
-        if (!iso) continue;
-        byDay.set(iso.slice(0, 10), {
+        const dayKey = portfolioHistoryDayKey(row.date);
+        if (!dayKey) continue;
+        byDay.set(dayKey, {
             total_value: row.total_value,
             cash_balance: row.cash_balance,
             equity_value: row.equity_value,
@@ -374,15 +376,18 @@ export async function getHistory(days = 30): Promise<PortfolioHistory[]> {
         });
     }
 
-    const sortedDays = Array.from(byDay.keys()).sort();
+    const sortedDays = Array.from(byDay.keys()).sort((a, b) => a.localeCompare(b));
     const cutoffKey = cutoff.slice(0, 10);
     const windowDays = sortedDays.filter(d => d >= cutoffKey);
 
     const out: PortfolioHistory[] = [];
-    let prevVal: number | null = null;
     for (const dk of windowDays) {
         const d = byDay.get(dk)!;
-        const changePct = prevVal && prevVal > 0 ? ((d.total_value - prevVal) / prevVal) * 100 : 0;
+        const priorTotal = lookupPriorSessionTotal(byDay, dk);
+        const changePct =
+            priorTotal != null && priorTotal > 0
+                ? ((d.total_value - priorTotal) / priorTotal) * 100
+                : 0;
         out.push({
             date: dk,
             total_value: d.total_value,
@@ -390,26 +395,52 @@ export async function getHistory(days = 30): Promise<PortfolioHistory[]> {
             equity_value: d.equity_value,
             day_change_pct: changePct,
         });
-        prevVal = d.total_value;
     }
     return out.slice(-days);
+}
+
+/** Prior US equity session that exists in `byDay`, walking back across weekends (and missing rows). */
+function lookupPriorSessionTotal(
+    byDay: Map<string, { total_value: number; cash_balance: number; equity_value: number }>,
+    sessionKey: string,
+): number | null {
+    let p = getPreviousUsTradingSessionEtYmd(sessionKey);
+    for (let i = 0; i < 20; i++) {
+        const row = byDay.get(p);
+        if (row) return row.total_value;
+        p = getPreviousUsTradingSessionEtYmd(p);
+    }
+    return null;
 }
 
 export async function saveHistorySnapshot(): Promise<void> {
     const db = getTurso();
     const status = await getPortfolioStatus();
     const now = new Date();
-    // Use ET date for consistency
-    const dateStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).split('/').reverse().join('-'); // Output roughly YYYY-MM-DD format (not perfectly ISO but works, let's use standard ISO slices)
+    const etDateStr = now.toLocaleDateString('sv', { timeZone: ET_TZ });
 
-    const etDateStr = now.toLocaleDateString('sv'); // 'sv' locale outputs YYYY-MM-DD
+    const histR = await db.execute({
+        sql: 'SELECT date, total_value FROM portfolio_history',
+        args: [],
+    });
+    const totalsByDay = new Map<string, number>();
+    for (const row of histR.rows as any[]) {
+        const histKey = portfolioHistoryDayKey(row.date);
+        if (histKey) totalsByDay.set(histKey, row.total_value as number);
+    }
 
-    // Calculate previous day change
-    const prevR = await db.execute({ sql: 'SELECT total_value FROM portfolio_history ORDER BY date DESC LIMIT 1', args: [] });
-    const prevData = prevR.rows[0] as any;
+    const priorSession = getPreviousUsTradingSessionEtYmd(etDateStr);
+    let priorTotal: number | null = null;
+    let p = priorSession;
+    for (let i = 0; i < 20 && priorTotal == null; i++) {
+        priorTotal = totalsByDay.get(p) ?? null;
+        if (priorTotal != null) break;
+        p = getPreviousUsTradingSessionEtYmd(p);
+    }
+
     let dayChange = 0;
-    if (prevData && prevData.total_value > 0) {
-        dayChange = ((status.total_value - prevData.total_value) / prevData.total_value) * 100;
+    if (priorTotal != null && priorTotal > 0) {
+        dayChange = ((status.total_value - priorTotal) / priorTotal) * 100;
     }
 
     await db.execute({
@@ -427,11 +458,19 @@ export async function savePortfolioSnapshot(): Promise<void> {
     const db = getTurso();
     const status = await getPortfolioStatus();
     const now = new Date().toISOString();
+    const cash = status.cash_balance;
+    const eq = status.total_equity;
+    const implied = cash + eq;
+    let total = status.total_value;
+    const tol = Math.max(150, Math.abs(implied) * 0.0025);
+    if (Math.abs(total - implied) > tol) {
+        total = implied;
+    }
 
     await db.execute({
         sql: `INSERT INTO portfolio_snapshots (timestamp, total_value, cash_balance, equity_value)
               VALUES (?, ?, ?, ?)`,
-        args: [now, status.total_value, status.cash_balance, status.total_equity]
+        args: [now, total, cash, eq]
     });
 }
 
@@ -485,12 +524,14 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
 
         const todayKey = etDateKey(now);
         const today = all.filter(s => etDateKey(s.timestamp) === todayKey);
-        if (today.length >= 2) return smoothIsolatedPortfolioValueSpikes(today);
+        if (today.length >= 2) {
+            return smoothIsolatedPortfolioValueSpikes(reconcileSnapshotTotals(today));
+        }
 
         // Fallback: most recent ET date in the window
         const latestKey = etDateKey(all[all.length - 1].timestamp);
         const session = all.filter(s => etDateKey(s.timestamp) === latestKey);
-        return smoothIsolatedPortfolioValueSpikes(session);
+        return smoothIsolatedPortfolioValueSpikes(reconcileSnapshotTotals(session));
     }
 
     if (timeframe === '1W') {
@@ -501,7 +542,7 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
             args: [cutoff]
         });
         const snaps = rowsToSnapshots(r.rows as any[]);
-        return smoothIsolatedPortfolioValueSpikes(downsampleByInterval(snaps, 60 * 60 * 1000));
+        return smoothIsolatedPortfolioValueSpikes(reconcileSnapshotTotals(downsampleByInterval(snaps, 60 * 60 * 1000)));
     }
 
     // ── 30D / ALL: one point per ET day, sourced primarily from portfolio_snapshots ──
@@ -531,9 +572,8 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
             args: []
         });
         for (const row of histR.rows as any[]) {
-            const iso = normalizeDateToISO(row.date);
-            if (!iso) continue;
-            const dayKey = iso.slice(0, 10);
+            const dayKey = portfolioHistoryDayKey(row.date);
+            if (!dayKey) continue;
             if (lastPerDay.has(dayKey)) continue; // prefer live snapshot data
             lastPerDay.set(dayKey, {
                 timestamp: dayKey + 'T20:00:00Z',
@@ -547,7 +587,17 @@ export async function getDetailedHistory(timeframe: '1D' | '1W' | '30D' | 'ALL')
     const points = Array.from(lastPerDay.values()).sort(
         (a, b) => a.timestamp.localeCompare(b.timestamp)
     );
-    return smoothIsolatedPortfolioValueSpikes(points);
+    return smoothIsolatedPortfolioValueSpikes(reconcileSnapshotTotals(points));
+}
+
+/** When total_value drifts from cash + equity (race / stale equity), trust the components for charts. */
+function reconcileSnapshotTotals(points: PortfolioSnapshot[]): PortfolioSnapshot[] {
+    return points.map((p) => {
+        const implied = p.cash_balance + p.equity_value;
+        const tol = Math.max(150, Math.abs(implied) * 0.0025);
+        if (Math.abs(p.total_value - implied) <= tol) return p;
+        return { ...p, total_value: implied };
+    });
 }
 
 /**
@@ -564,10 +614,12 @@ function smoothIsolatedPortfolioValueSpikes(points: PortfolioSnapshot[]): Portfo
         const mid = (prev + next) / 2;
         const neighborSpread = Math.abs(prev - next);
         const scale = Math.max(Math.abs(prev), Math.abs(next), 1);
-        if (neighborSpread > scale * 0.02) continue;
         const dev = Math.abs(cur - mid);
         const threshold = Math.max(scale * 0.015, 400);
-        if (dev <= threshold) continue;
+        const looksIsolated = dev > threshold && neighborSpread <= scale * 0.02;
+        const neighborsQuiet = neighborSpread <= scale * 0.03;
+        const strongOutlier = dev > Math.max(scale * 0.08, 2500);
+        if (!looksIsolated && !(strongOutlier && neighborsQuiet)) continue;
         out[i] = { ...out[i], total_value: mid };
     }
     return out;

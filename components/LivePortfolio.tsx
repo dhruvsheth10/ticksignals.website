@@ -6,6 +6,7 @@ import { ArrowUpRight, ArrowDownRight, RefreshCw, DollarSign, PieChart, Activity
 import BlurText from './BlurText';
 import AnimatedNumber from './AnimatedNumber';
 import { fetchJsonWithTimeout } from '../lib/fetchWithTimeout';
+import { portfolioHistoryDayKey, getPreviousUsTradingSessionEtYmd } from '../lib/portfolio-history-dates';
 
 interface PortfolioData {
     status: {
@@ -333,18 +334,27 @@ const LivePortfolio = ({ initialTimeframe = '1D' }: LivePortfolioProps = {}) => 
         const currentPoint = { date: new Date().toISOString(), total_value: data.status.total_value };
 
         if (timeframe === '1D') {
-            // Synthesised "today only" view: anchor at today's 9:30 AM ET
-            // with the most recent daily close as the baseline, ending at
-            // the live current value. Used only when we have no intraday
-            // snapshots yet (first cycle of the day).
-            const sorted = [...data.history].sort((a, b) => a.date.localeCompare(b.date));
-            const lastEntry = sorted[sorted.length - 1];
-            const openVal = lastEntry?.total_value ?? data.status.total_value;
+            // Baseline = last stored session strictly before today's ET date (prior close),
+            // not "latest row" which may already be today's partial save.
+            const sorted = [...data.history].sort(
+                (a, b) => (portfolioHistoryDayKey(a.date) || '').localeCompare(portfolioHistoryDayKey(b.date) || ''),
+            );
+            const now = new Date();
+            const todayEtKey = now.toLocaleDateString('sv', { timeZone: 'America/New_York' });
+            const beforeToday = sorted.filter((h) => {
+                const k = portfolioHistoryDayKey(h.date);
+                return k != null && k < todayEtKey;
+            });
+            let openVal =
+                beforeToday.length > 0 ? beforeToday[beforeToday.length - 1].total_value : undefined;
+            if (openVal == null) {
+                const pk = getPreviousUsTradingSessionEtYmd(todayEtKey);
+                openVal = sorted.find((h) => portfolioHistoryDayKey(h.date) === pk)?.total_value;
+            }
+            openVal = openVal ?? data.status.total_value;
 
             // 9:30 AM ET → UTC. Handles both EST (UTC-5) and EDT (UTC-4)
             // via Intl so this survives DST transitions.
-            const now = new Date();
-            const todayEtKey = now.toLocaleDateString('sv', { timeZone: 'America/New_York' });
             const openEt = new Date(`${todayEtKey}T09:30:00`);
             const etOffsetMs = openEt.getTime() - new Date(
                 openEt.toLocaleString('en-US', { timeZone: 'America/New_York' })
